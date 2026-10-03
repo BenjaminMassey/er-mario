@@ -41,3 +41,7 @@ cc = "1"
 
 [profile.release]
 panic = "unwind"
+
+# patched for renderers MinHook can't hook (CrossOver on a Mac): see vendor/hudhook/src/hooks/dx12.rs
+[patch.crates-io]
+hudhook = { path = "vendor/hudhook" }

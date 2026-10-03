@@ -360,6 +360,11 @@ pub fn install(module: usize) -> bool {
     use hudhook::hooks::dx12::ImguiDx12Hooks;
     let hmodule = hudhook::windows::Win32::Foundation::HINSTANCE(module as _);
     let overlay = Overlay { textures: Vec::new(), meter: None };
+    let _ = hudhook::NOTE.set(|msg| log(msg));
+    // test switch: start the overlay the way it has to on CrossOver (see vendor/hudhook)
+    if crate::paths::config("overlay_skip_ecl").is_some_and(|v| v.trim() == "1") {
+        unsafe { std::env::set_var("HUDHOOK_SKIP_ECL", "1") };
+    }
     match hudhook::Hudhook::builder().with::<ImguiDx12Hooks>(overlay).with_hmodule(hmodule).build().apply() {
         Ok(()) => {
             log("hud: overlay hooked");
