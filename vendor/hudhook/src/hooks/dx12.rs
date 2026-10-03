@@ -258,6 +258,19 @@ fn identity_ptr(identity: &IUnknown) -> usize {
     identity.as_raw() as usize
 }
 
+/// ER Mario: an object's identity, for telling whether two interfaces are the same object. COM's
+/// is its IUnknown pointer; CrossOver's D3D12 objects refuse that query (E_NOINTERFACE), and
+/// there the interface pointer itself has to do.
+fn ident<T: Interface>(object: &T) -> usize {
+    if std::env::var_os("HUDHOOK_SKIP_ECL").is_some() {
+        return object.as_raw() as usize;
+    }
+    match object.cast::<IUnknown>() {
+        Ok(identity) => identity_ptr(&identity),
+        Err(_) => object.as_raw() as usize,
+    }
+}
+
 fn command_queue_from_unknown(device: &IUnknown) -> Option<ID3D12CommandQueue> {
     let Ok(command_queue) = device.cast::<ID3D12CommandQueue>() else {
         return None;
@@ -307,11 +320,7 @@ fn command_queue_from_present_queues(
         warn!("ResizeBuffers1 first present queue is not a direct D3D12 command queue");
         return PresentQueueCapture::Invalid;
     };
-    let Ok(first_queue_identity) = first_queue.cast::<IUnknown>() else {
-        warn!("ResizeBuffers1 first present queue identity query failed");
-        return PresentQueueCapture::Invalid;
-    };
-    let first_queue_identity = identity_ptr(&first_queue_identity);
+    let first_queue_identity = ident(&first_queue);
     let first_node_mask = creation_node_masks.and_then(|masks| masks.first().copied());
 
     for (idx, present_queue) in present_queues.iter().enumerate().skip(1) {
@@ -325,11 +334,7 @@ fn command_queue_from_present_queues(
             );
             return PresentQueueCapture::Invalid;
         };
-        let Ok(command_queue_identity) = command_queue.cast::<IUnknown>() else {
-            warn!("ResizeBuffers1 present queue identity query failed at index {idx}");
-            return PresentQueueCapture::Invalid;
-        };
-        if identity_ptr(&command_queue_identity) != first_queue_identity {
+        if ident(&command_queue) != first_queue_identity {
             warn!(
                 "ResizeBuffers1 supplied multiple distinct present queues; skipping DX12 overlay \
                  reinitialization"
@@ -395,24 +400,20 @@ fn create_active_context(
     swap_chain_desc: &DXGI_SWAP_CHAIN_DESC,
     rtv_format: DXGI_FORMAT,
 ) -> Result<ActiveDx12Context> {
-    let swap_chain_identity: IUnknown = step("swap chain identity", swap_chain.cast())?;
     let device: ID3D12Device =
         step("swap chain device", unsafe { swap_chain_device(swap_chain, command_queue) })?;
-    let device_identity: IUnknown = step("device identity", device.cast())?;
     let queue_device: ID3D12Device = step(
         "command queue device",
         util::try_out_ptr(|v| unsafe { command_queue.GetDevice(v) }),
     )?;
-    let command_queue_device_identity: IUnknown =
-        step("queue device identity", queue_device.cast())?;
     let adapter_luid = unsafe { device.GetAdapterLuid() };
     let hwnd = swap_chain_desc.OutputWindow.0 as usize;
 
     Ok(ActiveDx12Context {
-        swap_chain_identity: identity_ptr(&swap_chain_identity),
-        device_identity: identity_ptr(&device_identity),
+        swap_chain_identity: ident(swap_chain),
+        device_identity: ident(&device),
         command_queue: command_queue.clone(),
-        command_queue_device_identity: identity_ptr(&command_queue_device_identity),
+        command_queue_device_identity: ident(&queue_device),
         adapter_luid,
         rtv_format,
         buffer_count: swap_chain_desc.BufferCount,
@@ -443,9 +444,7 @@ fn validate_pending_initialization_context(swap_chain: &IDXGISwapChain3) -> Resu
         return Ok(true);
     };
 
-    let captured_identity: IUnknown = captured_swap_chain.cast()?;
-    let current_identity: IUnknown = swap_chain.cast()?;
-    if identity_ptr(&captured_identity) == identity_ptr(&current_identity) {
+    if ident(&captured_swap_chain) == ident(swap_chain) {
         return Ok(true);
     }
 
@@ -460,11 +459,7 @@ fn validate_active_context(swap_chain: &IDXGISwapChain3) -> Result<bool> {
         return Ok(true);
     };
 
-    let Ok(current_swap_chain_identity) = swap_chain.cast::<IUnknown>() else {
-        unsafe { reset_pipeline("swap-chain identity query failed") };
-        return Ok(false);
-    };
-    if identity_ptr(&current_swap_chain_identity) != active.swap_chain_identity {
+    if ident(swap_chain) != active.swap_chain_identity {
         unsafe { reset_pipeline("swap-chain replacement") };
         return Ok(false);
     }
@@ -479,11 +474,7 @@ fn validate_active_context(swap_chain: &IDXGISwapChain3) -> Result<bool> {
             return Ok(false);
         },
     };
-    let Ok(current_device_identity) = current_device.cast::<IUnknown>() else {
-        unsafe { reset_pipeline("swap-chain device identity query failed") };
-        return Ok(false);
-    };
-    let current_device_identity_ptr = identity_ptr(&current_device_identity);
+    let current_device_identity_ptr = ident(&current_device);
     if current_device_identity_ptr != active.device_identity {
         warn!(
             "DX12 swap-chain device changed; old adapter LUID {}, new adapter LUID {}",
@@ -503,11 +494,7 @@ fn validate_active_context(swap_chain: &IDXGISwapChain3) -> Result<bool> {
                 return Ok(false);
             },
         };
-    let Ok(queue_device_identity) = queue_device.cast::<IUnknown>() else {
-        unsafe { reset_pipeline("command queue device identity query failed") };
-        return Ok(false);
-    };
-    let queue_device_identity_ptr = identity_ptr(&queue_device_identity);
+    let queue_device_identity_ptr = ident(&queue_device);
     if queue_device_identity_ptr != current_device_identity_ptr
         || queue_device_identity_ptr != active.command_queue_device_identity
     {
@@ -587,10 +574,8 @@ unsafe fn handle_swap_chain_created(
             return;
         }
 
-        if let Ok(current_identity) = swap_chain.cast::<IUnknown>() {
-            if identity_ptr(&current_identity) != active.swap_chain_identity {
-                reset_pipeline("swap-chain creation replacement");
-            }
+        if ident(&swap_chain) != active.swap_chain_identity {
+            reset_pipeline("swap-chain creation replacement");
         }
     }
 

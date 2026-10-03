@@ -222,7 +222,7 @@ impl RenderEngine for D3D12RenderEngine {
 
             self.command_list.ResourceBarrier(&rtv_to_present_barriers);
             self.command_list.Close()?;
-            self.command_queue.ExecuteCommandLists(&[Some(self.command_list.cast()?)]);
+            self.command_queue.ExecuteCommandLists(&[Some(as_command_list(&self.command_list))]);
 
             let new_fence_value = self.fence.incr() + 1;
             self.command_queue.Signal(self.fence.fence(), new_fence_value)?;
@@ -1049,7 +1049,7 @@ impl TextureHeap {
 
         self.command_list.ResourceBarrier(&barriers);
         self.command_list.Close()?;
-        self.command_queue.ExecuteCommandLists(&[Some(self.command_list.cast()?)]);
+        self.command_queue.ExecuteCommandLists(&[Some(as_command_list(&self.command_list))]);
         let fence_value = self.fence.incr() + 1;
         self.command_queue.Signal(self.fence.fence(), fence_value)?;
         self.fence.wait_for_value(fence_value)?;
@@ -1115,4 +1115,17 @@ mod tests {
             None
         );
     }
+}
+
+/// ER Mario: the list as its base interface. A graphics command list is a command list (same
+/// pointer); CrossOver's D3D12 objects don't always answer the interface query, so if it fails the
+/// pointer is used as it is.
+fn as_command_list<T: Interface>(list: &T) -> ID3D12CommandList {
+    if std::env::var_os("HUDHOOK_SKIP_ECL").is_none() {
+        if let Ok(base) = list.cast::<ID3D12CommandList>() {
+            return base;
+        }
+    }
+    let raw = list.as_raw();
+    unsafe { ID3D12CommandList::from_raw_borrowed(&raw) }.expect("null command list").clone()
 }
