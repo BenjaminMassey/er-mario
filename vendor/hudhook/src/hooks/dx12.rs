@@ -351,17 +351,60 @@ fn command_queue_from_present_queues(
     PresentQueueCapture::Valid(first_queue)
 }
 
+/// ER Mario: a failed overlay step, named in the host's log (once per step).
+fn step<T>(name: &'static str, r: Result<T>) -> Result<T> {
+    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    if let Err(e) = &r {
+        let mut seen = SEEN.lock();
+        if !seen.contains(&name) {
+            seen.push(name);
+            crate::note(format!("overlay: {name} failed: {e:?}"));
+        }
+    }
+    r
+}
+
+/// ER Mario: the D3D12 device behind a swap chain. On Windows DXGI hands it out directly;
+/// CrossOver's only knows the command queue there (E_NOINTERFACE), so it's that queue's device.
+unsafe fn swap_chain_device(
+    swap_chain: &IDXGISwapChain3,
+    command_queue: &ID3D12CommandQueue,
+) -> Result<ID3D12Device> {
+    static NOTED: AtomicBool = AtomicBool::new(false);
+    let direct = if std::env::var_os("HUDHOOK_SKIP_ECL").is_some() {
+        Err(Error::from_hresult(HRESULT(0x80004002u32 as i32)))
+    } else {
+        unsafe { swap_chain.GetDevice::<ID3D12Device>() }
+    };
+    match direct {
+        Ok(device) => Ok(device),
+        Err(e) => {
+            if !NOTED.swap(true, Ordering::Relaxed) {
+                crate::note(format!(
+                    "overlay: the swap chain doesn't give its device ({e:?}); using the command queue's"
+                ));
+            }
+            util::try_out_ptr(|v| unsafe { command_queue.GetDevice(v) })
+        },
+    }
+}
+
 fn create_active_context(
     swap_chain: &IDXGISwapChain3,
     command_queue: &ID3D12CommandQueue,
     swap_chain_desc: &DXGI_SWAP_CHAIN_DESC,
     rtv_format: DXGI_FORMAT,
 ) -> Result<ActiveDx12Context> {
-    let swap_chain_identity: IUnknown = swap_chain.cast()?;
-    let device: ID3D12Device = unsafe { swap_chain.GetDevice()? };
-    let device_identity: IUnknown = device.cast()?;
-    let queue_device: ID3D12Device = util::try_out_ptr(|v| unsafe { command_queue.GetDevice(v) })?;
-    let command_queue_device_identity: IUnknown = queue_device.cast()?;
+    let swap_chain_identity: IUnknown = step("swap chain identity", swap_chain.cast())?;
+    let device: ID3D12Device =
+        step("swap chain device", unsafe { swap_chain_device(swap_chain, command_queue) })?;
+    let device_identity: IUnknown = step("device identity", device.cast())?;
+    let queue_device: ID3D12Device = step(
+        "command queue device",
+        util::try_out_ptr(|v| unsafe { command_queue.GetDevice(v) }),
+    )?;
+    let command_queue_device_identity: IUnknown =
+        step("queue device identity", queue_device.cast())?;
     let adapter_luid = unsafe { device.GetAdapterLuid() };
     let hwnd = swap_chain_desc.OutputWindow.0 as usize;
 
@@ -426,7 +469,9 @@ fn validate_active_context(swap_chain: &IDXGISwapChain3) -> Result<bool> {
         return Ok(false);
     }
 
-    let current_device: ID3D12Device = match unsafe { swap_chain.GetDevice() } {
+    let current_device: ID3D12Device = match unsafe {
+        swap_chain_device(swap_chain, &active.command_queue)
+    } {
         Ok(device) => device,
         Err(e) => {
             warn!("Could not query DX12 swap-chain device: {e:?}");
@@ -595,7 +640,7 @@ unsafe fn init_pipeline() -> Result<Mutex<Pipeline<D3D12RenderEngine>>> {
         return Err(Error::from_hresult(HRESULT(-1)));
     };
 
-    let swap_chain_desc = unsafe { swap_chain.GetDesc() }?;
+    let swap_chain_desc = step("swap chain description", unsafe { swap_chain.GetDesc() })?;
     let Some(rtv_format) =
         D3D12RenderEngine::rtv_format_for_swap_chain(swap_chain_desc.BufferDesc.Format)
     else {
@@ -610,17 +655,21 @@ unsafe fn init_pipeline() -> Result<Mutex<Pipeline<D3D12RenderEngine>>> {
         create_active_context(&swap_chain, &command_queue, &swap_chain_desc, rtv_format)?;
 
     let mut ctx = Context::create();
-    let engine = D3D12RenderEngine::new(&command_queue, &mut ctx, rtv_format)?;
+    let engine =
+        step("render engine", D3D12RenderEngine::new(&command_queue, &mut ctx, rtv_format))?;
 
     let Some(render_loop) = RENDER_LOOP.take() else {
         error!("Render loop not yet initialized");
         return Err(Error::from_hresult(HRESULT(-1)));
     };
 
-    let pipeline = Pipeline::new(hwnd, ctx, engine, render_loop).map_err(|(e, render_loop)| {
-        RENDER_LOOP.get_or_init(move || render_loop);
-        e
-    })?;
+    let pipeline = step(
+        "pipeline",
+        Pipeline::new(hwnd, ctx, engine, render_loop).map_err(|(e, render_loop)| {
+            RENDER_LOOP.get_or_init(move || render_loop);
+            e
+        }),
+    )?;
 
     *ACTIVE_CONTEXT.lock() = Some(active_context);
     INIT_STATE.mark_done();
@@ -678,7 +727,7 @@ fn render(swap_chain: &IDXGISwapChain3) -> Result<()> {
             return Ok(());
         }
 
-        let swap_chain_desc = swap_chain.GetDesc()?;
+        let swap_chain_desc = step("swap chain description (frame)", swap_chain.GetDesc())?;
         if D3D12RenderEngine::rtv_format_for_swap_chain(swap_chain_desc.BufferDesc.Format).is_none()
         {
             warn!(
@@ -703,7 +752,7 @@ fn render(swap_chain: &IDXGISwapChain3) -> Result<()> {
             warn!("Could not update DX12 display size from swap chain: {e:?}");
         }
 
-        pipeline.prepare_render()?;
+        step("prepare render", pipeline.prepare_render())?;
 
         if let Err(e) = update_pipeline_display_size_from_swap_chain(&mut pipeline, swap_chain) {
             warn!(
@@ -712,9 +761,9 @@ fn render(swap_chain: &IDXGISwapChain3) -> Result<()> {
         }
 
         let target: ID3D12Resource =
-            swap_chain.GetBuffer(swap_chain.GetCurrentBackBufferIndex())?;
+            step("back buffer", swap_chain.GetBuffer(swap_chain.GetCurrentBackBufferIndex()))?;
 
-        pipeline.render(target)?;
+        step("draw", pipeline.render(target))?;
     }
 
     Ok(())
