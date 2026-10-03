@@ -287,8 +287,8 @@ struct Meter {
 }
 
 /// The steps the overlay library takes to find the renderer's functions (a throwaway device,
-/// command queue and swap chain), one by one with what each returns: on a platform where the
-/// overlay won't start, the log then says which one it is.
+/// command queue and swap chain), one by one with what each returns. Only run when the overlay
+/// didn't start: the log then says which step it is.
 pub fn probe_dx12() {
     use hudhook::windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
     use hudhook::windows::Win32::Graphics::Direct3D12::{
@@ -355,13 +355,20 @@ pub fn probe_dx12() {
 }
 
 /// Starts the overlay (hooks the game's DirectX 12 presentation).
-pub fn install(module: usize) {
+/// True if it's hooked.
+pub fn install(module: usize) -> bool {
     use hudhook::hooks::dx12::ImguiDx12Hooks;
     let hmodule = hudhook::windows::Win32::Foundation::HINSTANCE(module as _);
     let overlay = Overlay { textures: Vec::new(), meter: None };
     match hudhook::Hudhook::builder().with::<ImguiDx12Hooks>(overlay).with_hmodule(hmodule).build().apply() {
-        Ok(()) => log("hud: overlay hooked"),
-        Err(e) => log(format!("hud: overlay hook failed: {e:?}")),
+        Ok(()) => {
+            log("hud: overlay hooked");
+            true
+        }
+        Err(e) => {
+            log(format!("hud: overlay hook failed: {e:?}"));
+            false
+        }
     }
 }
 

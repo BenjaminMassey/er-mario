@@ -2867,15 +2867,33 @@ pub unsafe extern "C" fn DllMain(hmodule: usize, reason: u32) -> bool {
         unsafe { install_xinput_hooks() };
         unsafe { kbd::install_hooks() };
         // on its own thread: where the overlay can't hook the renderer (CrossOver on a Mac died
-        // or hung right here, and the mod never got any further) Mario still works, without his HUD
-        std::thread::spawn(|| {
-            if std::panic::catch_unwind(hud::probe_dx12).is_err() {
-                log("overlay probe: stopped by a panic (see above)");
+        // right here, and the mod never got any further) Mario still works, without his HUD.
+        // If it fails, or hasn't come back after a while, the steps it takes are tried one by one
+        // and logged, so the log says which one it is.
+        {
+            static DONE: AtomicBool = AtomicBool::new(false);
+            fn probe_once() {
+                static PROBED: AtomicBool = AtomicBool::new(false);
+                if !PROBED.swap(true, Ordering::Relaxed) && std::panic::catch_unwind(hud::probe_dx12).is_err() {
+                    log("overlay probe: stopped by a panic (see above)");
+                }
             }
-            if std::panic::catch_unwind(|| hud::install(MODULE.load(Ordering::Relaxed))).is_err() {
-                log("hud: the overlay could not be started; Mario runs without his HUD");
-            }
-        });
+            std::thread::spawn(|| {
+                let hooked = std::panic::catch_unwind(|| hud::install(MODULE.load(Ordering::Relaxed))).unwrap_or(false);
+                DONE.store(true, Ordering::Relaxed);
+                if !hooked {
+                    log("hud: the overlay could not be started; Mario runs without his HUD");
+                    probe_once();
+                }
+            });
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(20));
+                if !DONE.load(Ordering::Relaxed) {
+                    log("hud: the overlay still hasn't started after 20 s");
+                    probe_once();
+                }
+            });
+        }
         unsafe { gameover::install_hook() };
         unsafe { engine_mario::install_anim_hook() };
         equip::init();
