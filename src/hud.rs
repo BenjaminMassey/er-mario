@@ -286,6 +286,74 @@ struct Meter {
     full: Option<(Instant, f32)>,
 }
 
+/// The steps the overlay library takes to find the renderer's functions (a throwaway device,
+/// command queue and swap chain), one by one with what each returns: on a platform where the
+/// overlay won't start, the log then says which one it is.
+pub fn probe_dx12() {
+    use hudhook::windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+    use hudhook::windows::Win32::Graphics::Direct3D12::{
+        D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE, D3D12CreateDevice, ID3D12CommandQueue, ID3D12Device,
+    };
+    use hudhook::windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_MODE_DESC, DXGI_MODE_SCALING_UNSPECIFIED, DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+    };
+    use hudhook::windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_SWAP_CHAIN_DESC, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIFactory2, IDXGISwapChain, IDXGISwapChain1, IDXGISwapChain2, IDXGISwapChain3,
+    };
+    use hudhook::windows::core::{BOOL, Interface};
+    let step = |name: &str, result: String| log(format!("overlay probe: {name}: {result}"));
+    let hwnd = hudhook::hooks::DummyHwnd::new();
+    step("window", "ok".into());
+    let factory: IDXGIFactory2 = match unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)) } {
+        Ok(f) => f,
+        Err(e) => return step("DXGI factory", format!("{e:?}")),
+    };
+    step("DXGI factory", "ok".into());
+    let adapter = match unsafe { factory.EnumAdapters(0) } {
+        Ok(a) => a,
+        Err(e) => return step("adapter 0", format!("{e:?}")),
+    };
+    step("adapter 0", "ok".into());
+    let mut device: Option<ID3D12Device> = None;
+    if let Err(e) = unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut device) } {
+        return step("D3D12 device", format!("{e:?}"));
+    }
+    let Some(device) = device else { return step("D3D12 device", "no device returned".into()) };
+    step("D3D12 device", "ok".into());
+    let queue: ID3D12CommandQueue = match unsafe {
+        device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_DIRECT, Priority: 0, Flags: D3D12_COMMAND_QUEUE_FLAG_NONE, NodeMask: 0 })
+    } {
+        Ok(q) => q,
+        Err(e) => return step("command queue", format!("{e:?}")),
+    };
+    step("command queue", "ok".into());
+    let desc = DXGI_SWAP_CHAIN_DESC {
+        BufferDesc: DXGI_MODE_DESC {
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            ScanlineOrdering: DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED,
+            Scaling: DXGI_MODE_SCALING_UNSPECIFIED,
+            Width: 640,
+            Height: 480,
+            RefreshRate: DXGI_RATIONAL { Numerator: 60, Denominator: 1 },
+        },
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: 2,
+        OutputWindow: hwnd.hwnd(),
+        Windowed: BOOL(1),
+        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Flags: DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH.0 as _,
+    };
+    let mut chain: Option<IDXGISwapChain> = None;
+    let hr = unsafe { factory.CreateSwapChain(&queue, &desc, &mut chain) };
+    let Some(chain) = chain.filter(|_| hr.is_ok()) else { return step("swap chain", format!("{hr:?}")) };
+    step("swap chain", "ok".into());
+    step("IDXGISwapChain1", format!("{:?}", chain.cast::<IDXGISwapChain1>().map(|_| "ok")));
+    step("IDXGISwapChain2", format!("{:?}", chain.cast::<IDXGISwapChain2>().map(|_| "ok")));
+    step("IDXGISwapChain3", format!("{:?}", chain.cast::<IDXGISwapChain3>().map(|_| "ok")));
+}
+
 /// Starts the overlay (hooks the game's DirectX 12 presentation).
 pub fn install(module: usize) {
     use hudhook::hooks::dx12::ImguiDx12Hooks;

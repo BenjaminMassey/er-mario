@@ -2863,12 +2863,21 @@ pub unsafe extern "C" fn DllMain(hmodule: usize, reason: u32) -> bool {
             }
             return;
         }
+        std::panic::set_hook(Box::new(|info| log(format!("PANIC: {info}"))));
         unsafe { install_xinput_hooks() };
         unsafe { kbd::install_hooks() };
-        hud::install(MODULE.load(Ordering::Relaxed));
+        // on its own thread: where the overlay can't hook the renderer (CrossOver on a Mac died
+        // or hung right here, and the mod never got any further) Mario still works, without his HUD
+        std::thread::spawn(|| {
+            if std::panic::catch_unwind(hud::probe_dx12).is_err() {
+                log("overlay probe: stopped by a panic (see above)");
+            }
+            if std::panic::catch_unwind(|| hud::install(MODULE.load(Ordering::Relaxed))).is_err() {
+                log("hud: the overlay could not be started; Mario runs without his HUD");
+            }
+        });
         unsafe { gameover::install_hook() };
         unsafe { engine_mario::install_anim_hook() };
-        std::panic::set_hook(Box::new(|info| log(format!("PANIC: {info}"))));
         equip::init();
         lakitu::load_setting();
         std::thread::spawn(startup);
