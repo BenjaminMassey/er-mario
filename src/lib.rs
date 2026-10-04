@@ -1020,6 +1020,7 @@ fn pose_task() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
+    squish::apply();
     let Some(player) = (unsafe { WorldChrMan::instance() }).ok().and_then(|w| w.main_player.as_ref()) else { return };
     engine_mario::apply(&player.chr_ins as *const _ as usize);
 }
@@ -1062,6 +1063,7 @@ fn pose_task_late() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
+    squish::apply();
     let Some(player) = (unsafe { WorldChrMan::instance() }).ok().and_then(|w| w.main_player.as_ref()) else { return };
     engine_mario::apply(&player.chr_ins as *const _ as usize);
 }
