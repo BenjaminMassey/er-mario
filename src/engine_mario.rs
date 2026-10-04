@@ -277,11 +277,25 @@ pub fn set_standing(parts: &[PartPose; PARTS]) {
 /// The save's picture (pause menu, quit screen) is taken of a menu model, head and shoulders of
 /// a person: Mario is made smaller and held up so his head is what's in it (scale, m).
 const PICTURE_SIZE: f32 = 0.5;
-const PICTURE_LIFT: f32 = 1.0;
+const PICTURE_LIFT: f32 = 1.07;
+/// (degrees, and about where his head is at full size, m)
+const PICTURE_TILT: f32 = 25.0;
+const PICTURE_HEAD: Vec3 = Vec3::new(0.0, 0.8, 0.0);
 
-/// In the world: the menus' Mario models stand like the one in the world does right now.
-pub fn stand_like_world() {
-    let Some(pose) = *POSE.lock().unwrap_or_else(|e| e.into_inner()) else { return };
+/// Mario standing still (menu_mario::still), in character space.
+static STILL: Mutex<Option<[PartPose; PARTS]>> = Mutex::new(None);
+
+pub fn set_still(parts: &[PartPose; PARTS]) {
+    // facing the picture's camera, and leaning back around his head to look up at it (it looks
+    // down on a person's face)
+    let tilt = Quat::from_rotation_x(PICTURE_TILT.to_radians());
+    let pose = to_character(parts, Quat::from_rotation_y(std::f32::consts::PI)).map(|q| PartPose { rot: (tilt * q.rot).normalize(), pos: PICTURE_HEAD + tilt * (q.pos - PICTURE_HEAD), ..q });
+    *STILL.lock().unwrap_or_else(|e| e.into_inner()) = Some(pose);
+}
+
+/// In the world: the menus' Mario models stand still, so the picture is the same every time.
+pub fn stand_for_picture() {
+    let Some(pose) = *STILL.lock().unwrap_or_else(|e| e.into_inner()) else { return };
     let pose = pose.map(|q| PartPose { pos: q.pos * PICTURE_SIZE + Vec3::Y * PICTURE_LIFT, scale: q.scale * PICTURE_SIZE, ..q });
     *STANDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(pose);
 }
@@ -303,8 +317,13 @@ pub unsafe fn install_menu_hook() {
         let pose = unsafe { (*r).rcx } as usize;
         let sync: extern "win64" fn(usize) = unsafe { std::mem::transmute(original) };
         sync(pose);
-        if ANY.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = std::panic::catch_unwind(|| menu_pose(pose));
+        if HAVE_RENDS.load(std::sync::atomic::Ordering::Relaxed) && ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = std::panic::catch_unwind(|| {
+                note_importer(pose);
+                if ANY.load(std::sync::atomic::Ordering::Relaxed) {
+                    menu_pose(pose);
+                }
+            });
         }
         0
     };
@@ -322,26 +341,14 @@ pub unsafe fn install_menu_hook() {
     }
     let seen = |r: *mut ilhook::x64::Registers| {
         let rend = unsafe { (*r).rcx } as usize;
-        let young = {
-            let mut rends = RENDS.lock().unwrap_or_else(|e| e.into_inner());
-            let now = std::time::Instant::now();
-            match rends.iter_mut().find(|e| e.0 == rend) {
-                Some(e) => {
-                    e.2 = now;
-                    e.1.elapsed().as_secs_f32() < 3.0
-                }
-                None => {
-                    if rends.len() < 16 {
-                        rends.push((rend, now, now));
-                    }
-                    true
-                }
-            }
-        };
-        // its parts load over the next frames
-        if young && ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = std::panic::catch_unwind(|| find_models(true));
+        let mut rends = RENDS.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if let Some(e) = rends.iter_mut().find(|e| e.0 == rend) {
+            e.2 = now;
+        } else if rends.len() < 16 {
+            rends.push((rend, now, now));
         }
+        HAVE_RENDS.store(true, std::sync::atomic::Ordering::Relaxed);
     };
     match unsafe { ilhook::x64::hook_closure_jmp_back(at, seen, CallbackOption::None, HookFlags::empty()) } {
         Ok(h) => {
@@ -363,6 +370,28 @@ static RENDS: Mutex<Vec<(usize, std::time::Instant, std::time::Instant)>> = Mute
 pub static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// MARIO_IMPORTERS has any (the pose sync runs for every skeleton in the game).
 static ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// RENDS has any.
+static HAVE_RENDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A pose importer's vtable, once known.
+static IMPORTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The importers synced lately, sorted: (address, when). Filled while menu models exist, so
+/// finding a model's own is comparing addresses, not reading every object it points at.
+static LIVE: Mutex<Vec<(usize, std::time::Instant)>> = Mutex::new(Vec::new());
+
+fn note_importer(pose: usize) {
+    let imp = pose.wrapping_sub(0x48);
+    let vtable = IMPORTER.load(std::sync::atomic::Ordering::Relaxed);
+    if vtable == 0 || explore::read_u64(imp) != Some(vtable as u64) {
+        return;
+    }
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    match live.binary_search_by_key(&imp, |e| e.0) {
+        Ok(i) => live[i].1 = now,
+        Err(i) if live.len() < 4096 => live.insert(i, (imp, now)),
+        Err(_) => {}
+    }
+}
 /// The pose importers of the renderers that wear the Mario set (refreshed by `menu_models`).
 static MARIO_IMPORTERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
@@ -375,7 +404,7 @@ pub fn menu_models() -> bool {
 /// `now`: don't wait for the next round (a new model: the save's picture is taken of one that
 /// only lives for a moment).
 fn find_models(now: bool) -> bool {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     let chest = crate::equip::MARIO_CHEST;
     // (a model can be updated once and then sit there while its parts load: it's kept for a
     // while after its last update. Reading one that's gone is harmless, only poses the game
@@ -383,10 +412,10 @@ fn find_models(now: bool) -> bool {
     let (rends, young): (Vec<usize>, bool) = {
         let mut r = RENDS.lock().unwrap_or_else(|e| e.into_inner());
         r.retain(|e| e.2.elapsed().as_secs_f32() < 3.0);
+        HAVE_RENDS.store(!r.is_empty(), Ordering::Relaxed);
         (r.iter().map(|e| e.0).collect(), r.iter().any(|e| e.1.elapsed().as_secs_f32() < 3.0))
     };
-    // (the walk below reads a lot of memory: a few times a second is plenty for models that
-    // are there to stay)
+    // (every frame while a model is new, a few times a second for those that stay)
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
@@ -396,8 +425,33 @@ fn find_models(now: bool) -> bool {
         *last = Some(std::time::Instant::now());
     }
     let pointer = |at: usize| explore::read_u64(at).map(|p| p as usize).filter(|p| *p > 0x10000 && p % 8 == 0 && p >> 47 == 0);
-    static IMPORTER: AtomicUsize = AtomicUsize::new(0);
-    let is_importer = |p: usize| explore::read_u64(p).is_some_and(|v| v != 0 && v as usize == IMPORTER.load(Ordering::Relaxed));
+    let live: Vec<usize> = {
+        let mut l = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+        l.retain(|e| e.1.elapsed().as_secs_f32() < 1.0);
+        l.iter().map(|e| e.0).collect()
+    };
+    let is_live = |p: usize| live.binary_search(&p).is_ok();
+    // the pointers in `len` bytes of an object (checked once, then read as they are)
+    let pointers = |obj: usize, len: usize| -> Vec<usize> {
+        if !explore::readable(obj, len) {
+            return Vec::new();
+        }
+        (0..len).step_by(8).map(|off| unsafe { *((obj + off) as *const usize) }).filter(|p| *p > 0x10000 && p % 8 == 0 && p >> 47 == 0).collect()
+    };
+    // which vtables are armour pieces (class names are slow to read: once per kind)
+    static PIECES: Mutex<Vec<(usize, bool)>> = Mutex::new(Vec::new());
+    let is_piece = |obj: usize| -> bool {
+        let Some(vtable) = explore::read_u64(obj).map(|v| v as usize) else { return false };
+        let mut known = PIECES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = known.iter().find(|k| k.0 == vtable) {
+            return k.1;
+        }
+        let piece = explore::class_of(obj).is_some_and(|c| c.ends_with("PartsModelIns"));
+        if known.len() < 256 {
+            known.push((vtable, piece));
+        }
+        piece
+    };
     let mut found = Vec::new();
     for rend in rends {
         // renderer +0x1ac the armour ids of its ChrAsm (head, chest, arms, legs from +0x1dc),
@@ -408,28 +462,32 @@ fn find_models(now: bool) -> bool {
         // the body's pose importer: model +0x18 display entity, its +0x210 exporter, that one's
         // +0x158 source
         let body = pointer(rend + 0x770).and_then(|m| pointer(m + 0x18)).and_then(|e| pointer(e + 0x210)).and_then(|e| pointer(e + 0x158));
-        let Some(body) = body else { continue };
+        // what an importer is (its vtable): from this body, or from the player in the world
+        // (ChrIns +0x398). The picture's model doesn't always have a body of its own.
         if IMPORTER.load(Ordering::Relaxed) == 0 {
-            if explore::class_of(body).as_deref() != Some("CS::CSFD4LocationHkaPoseImporter") {
-                continue;
+            use fromsoftware_shared::FromStatic;
+            let player = unsafe { eldenring::cs::WorldChrMan::instance() }
+                .ok()
+                .and_then(|w| w.main_player.as_ref())
+                .and_then(|p| pointer(&p.chr_ins as *const _ as usize + 0x398));
+            if let Some(imp) = [body, player].into_iter().flatten().find(|p| explore::class_of(*p).as_deref() == Some("CS::CSFD4LocationHkaPoseImporter")) {
+                IMPORTER.store(explore::read_u64(imp).unwrap_or(0) as usize, Ordering::Relaxed);
             }
-            IMPORTER.store(explore::read_u64(body).unwrap_or(0) as usize, Ordering::Relaxed);
+            // (the sync hook fills LIVE from the next frame on)
+            continue;
         }
-        if is_importer(body) {
+        if let Some(body) = body.filter(|b| is_live(*b)) {
             found.push(body);
         }
         // the armour pieces keep theirs in different places (through their cloth, their
         // location entities): any importer a piece points at, directly or one object on
         let Some(asm) = pointer(rend + 0x778) else { continue };
-        for part in (0x08..0x200).step_by(8).filter_map(|off| pointer(asm + off)) {
-            if !explore::class_of(part).is_some_and(|c| c.ends_with("PartsModelIns")) {
-                continue;
-            }
-            for inner in (0x08..0x3b0).step_by(8).filter_map(|off| pointer(part + off)) {
-                if is_importer(inner) {
+        for part in pointers(asm, 0x200).into_iter().filter(|p| is_piece(*p)) {
+            for inner in pointers(part, 0x3b0) {
+                if is_live(inner) {
                     found.push(inner);
                 } else {
-                    found.extend((0x08..0x220).step_by(8).filter_map(|off| pointer(inner + off)).filter(|p| is_importer(*p)));
+                    found.extend(pointers(inner, 0x220).into_iter().filter(|p| is_live(*p)));
                 }
             }
         }

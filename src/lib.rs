@@ -305,12 +305,14 @@ fn hud_task() {
     // character creation: the Vagabond's preview is Mario too
     // (in the world too: the save's picture in the pause menu is taken of a menu model)
     let in_world = IN_WORLD.load(Ordering::Relaxed);
-    let active = if in_world { ENABLED.load(Ordering::Relaxed) } else { WANTED.load(Ordering::Relaxed) && equip::menu_mario() };
+    // (not tied to Mario mode being on: immediately after a load it isn't yet, and the menu can
+    // already be opened)
+    let active = WANTED.load(Ordering::Relaxed) && assets::ready() && SM64_READY.load(Ordering::Relaxed) && (in_world || equip::menu_mario());
     engine_mario::ACTIVE.store(active, Ordering::Relaxed);
     let menu = active && engine_mario::menu_models();
     menu_mario::tick(menu && !in_world);
     if active && in_world {
-        engine_mario::stand_like_world();
+        engine_mario::stand_for_picture();
     }
     let Ok(fe) = (unsafe { eldenring::cs::CSFeManImp::instance_mut() }) else { return };
     use eldenring::cs::CSFeManHudState as Hud;
@@ -582,6 +584,7 @@ fn init_sm64(export: bool) -> Option<Option<assets::model::MarioModel>> {
         let mut tex = vec![0u8; 4 * sm64::TEXTURE_W * sm64::TEXTURE_H];
         unsafe { sm64::sm64_global_init(rom.as_ptr(), tex.as_mut_ptr()) };
         let model = if export { assets::model::export(&mut ctx.geo, tex) } else { None };
+        menu_mario::still(&mut ctx.geo);
         unsafe { sm64::sm64_audio_init(rom.as_ptr()) };
         model
     })?;

@@ -88,3 +88,33 @@ pub fn tick(on: bool) {
         _ => {}
     }
 }
+
+/// Mario standing still with his eyes open, for the save's picture: taken once at startup, on
+/// the libsm64 thread before anything else uses it (it loads its own floor).
+pub fn still(geo: &mut sm64::Geometry) {
+    let e = 8000;
+    let floor = [
+        sm64::SM64Surface::grass([[-e, 0, -e], [e, 0, e], [e, 0, -e]]),
+        sm64::SM64Surface::grass([[-e, 0, -e], [-e, 0, e], [e, 0, e]]),
+    ];
+    unsafe { sm64::sm64_static_surfaces_load(floor.as_ptr(), floor.len() as u32) };
+    let id = unsafe { sm64::sm64_mario_create(0.0, 0.0, 0.0) };
+    if id < 0 {
+        return;
+    }
+    let inputs = sm64::SM64MarioInputs::default();
+    let mut state = sm64::SM64MarioState::default();
+    // (a few ticks: he lands first)
+    for _ in 0..10 {
+        let mut b = geo.buffers();
+        unsafe { sm64::sm64_mario_tick(id, &inputs, &mut state, &mut *b) };
+    }
+    let mut mats = vec![0f32; 64 * 16];
+    let mut tri_part = vec![0i32; sm64::GEO_MAX_TRIANGLES];
+    let count = unsafe { sm64::sm64_er_get_parts(mats.as_mut_ptr(), tri_part.as_mut_ptr(), std::ptr::null_mut(), std::ptr::null_mut()) };
+    unsafe { sm64::sm64_mario_delete(id) };
+    const EYES_OPEN: u8 = 5;
+    if let Some(parts) = engine_mario::relative_parts(&mats, count, state.position, EYES_OPEN, false) {
+        engine_mario::set_still(&parts);
+    }
+}
