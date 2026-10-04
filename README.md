@@ -37,6 +37,8 @@ work through Steam Input, which Steam turns on for them by default.
 
 **Stay offline.** me3 starts the game offline with anti-cheat off. Never play this mod online.
 
+**FOR STREAMERS:** You need to use window capture or display capture for the HUD to appear properly.
+
 ## Known issues
 
 - While alot of them should be fixed, there is still a chance that you might clip through some elevators. Let me know which ones and I will fix them ASAP.
