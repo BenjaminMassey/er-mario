@@ -332,7 +332,10 @@ pub unsafe fn install_menu_hook() {
             std::mem::forget(h);
             log("engine mario: hooked the pose sync");
         }
-        Err(e) => log(format!("engine mario: pose sync hook failed: {e:?}")),
+        Err(e) => {
+            log(format!("engine mario: pose sync hook failed: {e:?}"));
+            return;
+        }
     }
     let at = base.0 as usize + REND_UPDATE_RVA;
     if unsafe { *(at as *const [u8; 16]) } != REND_UPDATE_CODE {
@@ -353,6 +356,7 @@ pub unsafe fn install_menu_hook() {
     match unsafe { ilhook::x64::hook_closure_jmp_back(at, seen, CallbackOption::None, HookFlags::empty()) } {
         Ok(h) => {
             std::mem::forget(h);
+            MENU_HOOKS.store(true, std::sync::atomic::Ordering::Relaxed);
             log("engine mario: hooked the menu model update");
         }
         Err(e) => log(format!("engine mario: menu model hook failed: {e:?}")),
@@ -370,6 +374,9 @@ static RENDS: Mutex<Vec<(usize, std::time::Instant, std::time::Instant)>> = Mute
 pub static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// MARIO_IMPORTERS has any (the pose sync runs for every skeleton in the game).
 static ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Both menu hooks are in (they aren't on a game version they don't know): without them the
+/// menus' models keep the Vagabond's look.
+pub static MENU_HOOKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// RENDS has any.
 static HAVE_RENDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// A pose importer's vtable, once known.

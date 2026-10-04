@@ -173,6 +173,9 @@ fn mario_class() {
 /// loads it. False until the params are there.
 pub fn menu_mario() -> bool {
     use eldenring::cs::{EquipParamProtector, SoloParamRepository};
+    if !crate::engine_mario::MENU_HOOKS.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
     let Ok(repo) = (unsafe { SoloParamRepository::instance() }) else { return false };
     // (asking for a row before the params are loaded panics)
     if repo.solo_param_holders[1].get_res_cap(0).is_none() {
