@@ -303,9 +303,15 @@ fn hud_task() {
     static HIDDEN: AtomicBool = AtomicBool::new(false);
     names::class_name();
     // character creation: the Vagabond's preview is Mario too
-    let menu = !IN_WORLD.load(Ordering::Relaxed) && WANTED.load(Ordering::Relaxed) && equip::menu_mario();
-    engine_mario::MENU.store(menu, Ordering::Relaxed);
-    menu_mario::tick(menu);
+    // (in the world too: the save's picture in the pause menu is taken of a menu model)
+    let in_world = IN_WORLD.load(Ordering::Relaxed);
+    let active = if in_world { ENABLED.load(Ordering::Relaxed) } else { WANTED.load(Ordering::Relaxed) && equip::menu_mario() };
+    engine_mario::ACTIVE.store(active, Ordering::Relaxed);
+    let menu = active && engine_mario::menu_models();
+    menu_mario::tick(menu && !in_world);
+    if active && in_world {
+        engine_mario::stand_like_world();
+    }
     let Ok(fe) = (unsafe { eldenring::cs::CSFeManImp::instance_mut() }) else { return };
     use eldenring::cs::CSFeManHudState as Hud;
     let mario = ENABLED.load(Ordering::Relaxed) && IN_WORLD.load(Ordering::Relaxed);

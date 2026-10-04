@@ -274,8 +274,17 @@ pub fn set_standing(parts: &[PartPose; PARTS]) {
     *STANDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(pose);
 }
 
-/// A character model in the menus wears the Mario set (set every frame, lib.rs).
-pub static MENU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The save's picture (pause menu, quit screen) is taken of a menu model, head and shoulders of
+/// a person: Mario is made smaller and held up so his head is what's in it (scale, m).
+const PICTURE_SIZE: f32 = 0.5;
+const PICTURE_LIFT: f32 = 1.0;
+
+/// In the world: the menus' Mario models stand like the one in the world does right now.
+pub fn stand_like_world() {
+    let Some(pose) = *POSE.lock().unwrap_or_else(|e| e.into_inner()) else { return };
+    let pose = pose.map(|q| PartPose { pos: q.pos * PICTURE_SIZE + Vec3::Y * PICTURE_LIFT, scale: q.scale * PICTURE_SIZE, ..q });
+    *STANDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(pose);
+}
 
 /// hkaPose::syncModelSpace: every skeleton's model pose goes through it, the menus' too (the
 /// character creation preview isn't a ChrIns and never reaches the animation job above).
@@ -294,7 +303,7 @@ pub unsafe fn install_menu_hook() {
         let pose = unsafe { (*r).rcx } as usize;
         let sync: extern "win64" fn(usize) = unsafe { std::mem::transmute(original) };
         sync(pose);
-        if MENU.load(std::sync::atomic::Ordering::Relaxed) {
+        if ANY.load(std::sync::atomic::Ordering::Relaxed) {
             let _ = std::panic::catch_unwind(|| menu_pose(pose));
         }
         0
@@ -313,12 +322,25 @@ pub unsafe fn install_menu_hook() {
     }
     let seen = |r: *mut ilhook::x64::Registers| {
         let rend = unsafe { (*r).rcx } as usize;
-        let mut rends = RENDS.lock().unwrap_or_else(|e| e.into_inner());
-        let now = std::time::Instant::now();
-        if let Some(e) = rends.iter_mut().find(|e| e.0 == rend) {
-            e.1 = now;
-        } else if rends.len() < 16 {
-            rends.push((rend, now));
+        let young = {
+            let mut rends = RENDS.lock().unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            match rends.iter_mut().find(|e| e.0 == rend) {
+                Some(e) => {
+                    e.2 = now;
+                    e.1.elapsed().as_secs_f32() < 3.0
+                }
+                None => {
+                    if rends.len() < 16 {
+                        rends.push((rend, now, now));
+                    }
+                    true
+                }
+            }
+        };
+        // its parts load over the next frames
+        if young && ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = std::panic::catch_unwind(|| find_models(true));
         }
     };
     match unsafe { ilhook::x64::hook_closure_jmp_back(at, seen, CallbackOption::None, HookFlags::empty()) } {
@@ -335,33 +357,47 @@ pub unsafe fn install_menu_hook() {
 /// one of them.
 const REND_UPDATE_RVA: usize = 0xbbbe00;
 const REND_UPDATE_CODE: [u8; 16] = [0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xd9, 0x48, 0x8b, 0xfa];
-/// The renderers updated lately: (address, when).
-static RENDS: Mutex<Vec<(usize, std::time::Instant)>> = Mutex::new(Vec::new());
+/// The renderers updated lately: (address, first seen, last seen).
+static RENDS: Mutex<Vec<(usize, std::time::Instant, std::time::Instant)>> = Mutex::new(Vec::new());
+/// Mario is wanted on the menus' models (set every frame, lib.rs).
+pub static ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// MARIO_IMPORTERS has any (the pose sync runs for every skeleton in the game).
+static ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The pose importers of the renderers that wear the Mario set (refreshed by `menu_models`).
 static MARIO_IMPORTERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 /// Every frame outside the world: which of the menus' character models wear the Mario set. Only
 /// their skeletons get Mario's pose (the bare ones would be stretched over it). True if any does.
-pub fn menu_models(chest: i32) -> bool {
+pub fn menu_models() -> bool {
+    find_models(false)
+}
+
+/// `now`: don't wait for the next round (a new model: the save's picture is taken of one that
+/// only lives for a moment).
+fn find_models(now: bool) -> bool {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    // (the walk below reads a lot of memory: a few times a second is plenty, models don't
-    // change faster)
+    let chest = crate::equip::MARIO_CHEST;
+    // (a model can be updated once and then sit there while its parts load: it's kept for a
+    // while after its last update. Reading one that's gone is harmless, only poses the game
+    // itself syncs are written to)
+    let (rends, young): (Vec<usize>, bool) = {
+        let mut r = RENDS.lock().unwrap_or_else(|e| e.into_inner());
+        r.retain(|e| e.2.elapsed().as_secs_f32() < 3.0);
+        (r.iter().map(|e| e.0).collect(), r.iter().any(|e| e.1.elapsed().as_secs_f32() < 3.0))
+    };
+    // (the walk below reads a lot of memory: a few times a second is plenty for models that
+    // are there to stay)
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|t| t.elapsed().as_secs_f32() < 0.25) {
-            return !MARIO_IMPORTERS.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+        if !now && !young && last.is_some_and(|t| t.elapsed().as_secs_f32() < 0.25) {
+            return ANY.load(Ordering::Relaxed);
         }
         *last = Some(std::time::Instant::now());
     }
-    let rends: Vec<usize> = {
-        let mut r = RENDS.lock().unwrap_or_else(|e| e.into_inner());
-        r.retain(|e| e.1.elapsed().as_secs_f32() < 0.5);
-        r.iter().map(|e| e.0).collect()
-    };
     let pointer = |at: usize| explore::read_u64(at).map(|p| p as usize).filter(|p| *p > 0x10000 && p % 8 == 0 && p >> 47 == 0);
     static IMPORTER: AtomicUsize = AtomicUsize::new(0);
-    let is_importer = |p: usize| explore::read_u64(p).is_some_and(|v| v as usize == IMPORTER.load(Ordering::Relaxed));
+    let is_importer = |p: usize| explore::read_u64(p).is_some_and(|v| v != 0 && v as usize == IMPORTER.load(Ordering::Relaxed));
     let mut found = Vec::new();
     for rend in rends {
         // renderer +0x1ac the armour ids of its ChrAsm (head, chest, arms, legs from +0x1dc),
@@ -405,6 +441,7 @@ pub fn menu_models(chest: i32) -> bool {
         crate::dlog(format!("menu pose: Mario's skeletons {found:x?}"));
         *known = found;
     }
+    ANY.store(!known.is_empty(), Ordering::Relaxed);
     !known.is_empty()
 }
 

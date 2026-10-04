@@ -170,7 +170,7 @@ fn mario_class() {
 }
 
 /// Outside the world (character creation): Mario's model on the Vagabond set, so the preview
-/// loads it, and whether a character model on screen wears that set.
+/// loads it. False until the params are there.
 pub fn menu_mario() -> bool {
     use eldenring::cs::{EquipParamProtector, SoloParamRepository};
     let Ok(repo) = (unsafe { SoloParamRepository::instance() }) else { return false };
@@ -185,8 +185,11 @@ pub fn menu_mario() -> bool {
         log("equip: Mario's model on the Vagabond set (menus)");
     }
     mario_class();
-    crate::engine_mario::menu_models(VAGABOND[1] as i32)
+    true
 }
+
+/// The Mario set's chest piece, as a ChrAsm has it.
+pub const MARIO_CHEST: i32 = VAGABOND[1] as i32;
 
 /// Set while the armour slots are being emptied (so that equipping the set afterwards loads the
 /// model that was just switched); the game applies equips a little later, so this is a phase the
