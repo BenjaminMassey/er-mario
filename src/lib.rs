@@ -306,7 +306,14 @@ fn hud_task() {
     // HideAll: nothing of Elden Ring's HUD. It also hides the subtitle display, and a dialogue line
     // can only be skipped while it's shown, so during a conversation (the game stops taking the
     // character's actions, but no menu is up and the world runs) it's PopupMenu: subtitles on.
-    let talking = MENU_OPEN.load(Ordering::Relaxed) && !game_menu_open() && !WORLD_PAUSED.load(Ordering::Relaxed);
+    let talk_id = talk_line();
+    {
+        static LAST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
+        if LAST.swap(talk_id, Ordering::Relaxed) != talk_id {
+            dlog(format!("hud: talk line {talk_id}"));
+        }
+    }
+    let talking = talk_id > 0 || (MENU_OPEN.load(Ordering::Relaxed) && !game_menu_open() && !WORLD_PAUSED.load(Ordering::Relaxed));
     {
         static WAS: AtomicBool = AtomicBool::new(false);
         if WAS.swap(talking, Ordering::Relaxed) != talking {
@@ -343,6 +350,11 @@ fn game_menu_job() -> usize {
         .and_then(|m| m.popup_menu)
         .map(|p| unsafe { *(((p.as_ptr() as usize) + 0xB0) as *const usize) })
         .unwrap_or(0)
+}
+
+/// The dialogue line the popup menu is showing (its TalkParam row), if the game has one up.
+fn talk_line() -> i32 {
+    unsafe { eldenring::cs::CSMenuManImp::instance() }.ok().and_then(|m| m.popup_menu).map(|p| unsafe { p.as_ref() }.current_talk_id).unwrap_or(-1)
 }
 
 static WORLD_PAUSED: AtomicBool = AtomicBool::new(false);
