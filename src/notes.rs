@@ -16,13 +16,13 @@ const NOTES: &str = concat!(
     "ER Mario ",
     env!("CARGO_PKG_VERSION"),
     " Patch notes:\n\n",
-    "* Can't walk through doors and fog gates anymore.\n",
-    "* Lifts, cages and the big bridge in Volcano Manor work.\n",
-    "* Lava gives Mario his burning jump (one wedge).\n",
-    "* Bosses no longer one-shot.\n",
-    "* The Fire Giant is not an asshole anymore.\n",
-    "* Holding crouch and unpausing no longer freeze him.\n",
-    "* Some smaller fixes here and there."
+    "* Mario in character creation: on the class card, as the preview, and in your save picture.\n",
+    "* Some balancing tweaks, bosses are harder to stagger, it now depends on their poise.\n",
+    "* Enemies get squished when you land on them. (SO satisfying)\n",
+    "* Red NPC invaders can be hit now.\n",
+    "* Dialogue subtitles show up and can be skipped.\n",
+    "* Works on Mac through CrossOver.\n",
+    "* No more sliding on tiny bumps, and rocks stay solid when you jump next to them."
 );
 
 /// Which version's notes were shown last.
