@@ -34,12 +34,13 @@ impl Attack {
     fn spec(self) -> (i32, u32, u16, f32, u8, f32) {
         match self {
             // damage: % of the (fist) weapon's attack rating, flat value too
-            Attack::Punch => (65, 994, 150, 15.0, 1, 0.7),
-            Attack::Kick => (66, 995, 200, 20.0, 1, 0.7),
-            Attack::Sweep => (67, 996, 150, 25.0, 2, 0.9),
-            Attack::GroundPound => (68, 997, 350, 60.0, 3, 1.5),
-            Attack::Stomp => (69, 998, 250, 35.0, 2, 0.8),
-            Attack::Dash => (70, 999, 175, 25.0, 2, 0.8),
+            // poise: a boss with up to 100 poise takes 5 ground pounds
+            Attack::Punch => (65, 994, 150, 9.0, 1, 0.7),
+            Attack::Kick => (66, 995, 200, 11.0, 1, 0.7),
+            Attack::Sweep => (67, 996, 150, 14.0, 2, 0.9),
+            Attack::GroundPound => (68, 997, 350, 20.0, 3, 1.5),
+            Attack::Stomp => (69, 998, 250, 14.0, 2, 0.8),
+            Attack::Dash => (70, 999, 175, 14.0, 2, 0.8),
         }
     }
 
@@ -169,7 +170,8 @@ fn patch_params() -> bool {
         a.set_atk_fire(0);
         a.set_atk_thun(0);
         a.set_atk_stam(30);
-        a.set_atk_super_armor(poise);
+        // a bit under the meter's share, so an 80 poise boss doesn't break a hit early
+        a.set_atk_super_armor(poise * 0.8);
         a.set_dmg_level(level);
         a.set_atk_attribute(1); // strike
         a.set_is_add_base_atk(false);
@@ -513,13 +515,7 @@ fn take_share(handle: &FieldInsHandle, attack: Attack) -> bool {
         if let Some((t, tmax)) = crate::swing::toughness_of(handle) {
             log(format!("combat: boss poise {t:.0}/{tmax:.0}"));
         }
-        crate::swing::add_stance(handle, match attack {
-            Attack::GroundPound => crate::swing::STANCE_GROUND_POUND,
-            Attack::Stomp => crate::swing::STANCE_STOMP,
-            Attack::Dash => crate::swing::STANCE_DIVE,
-            Attack::Kick | Attack::Sweep => crate::swing::STANCE_KICK,
-            Attack::Punch => crate::swing::STANCE_PUNCH,
-        });
+        crate::swing::add_stance(handle, attack.spec().3);
     }
     let data = &mut chr.modules.data;
     let (hp, max) = (data.hp, data.max_hp.max(1));

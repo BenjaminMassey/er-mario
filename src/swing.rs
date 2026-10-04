@@ -174,12 +174,10 @@ pub fn is_down(h: &FieldInsHandle) -> bool {
     matches!(st.phase, Phase::Down { boss, .. } | Phase::Flying { boss, .. } | Phase::Limp { boss, .. } | Phase::Returning { boss, .. } if key(&boss) == key(h))
 }
 
-/// Mario's stagger meter per boss hit (% of full); it drains after a few seconds without hits
-pub const STANCE_GROUND_POUND: f32 = 34.0;
-pub const STANCE_STOMP: f32 = 20.0;
-pub const STANCE_DIVE: f32 = 12.0;
-pub const STANCE_KICK: f32 = 10.0;
-pub const STANCE_PUNCH: f32 = 8.0;
+/// Mario's stagger meter (% of full) fills by the hit's poise damage against the boss's own
+/// poise, kept in this range so no boss breaks in one hit or never. It drains after a few
+/// seconds without hits.
+const STANCE_POISE: (f32, f32) = (100.0, 200.0);
 const STANCE_HOLD: f32 = 4.0;
 const STANCE_DRAIN: f32 = 15.0;
 /// SOUND_OBJ_BOWSER_DEFEATED: the cue that the boss is open for the grab
@@ -242,7 +240,10 @@ pub fn take_cue() -> bool {
 
 /// Mario hit a boss: his stagger meter fills; full, the boss is open for the grab (and his poise
 /// is broken, so the game staggers him too).
-pub fn add_stance(h: &FieldInsHandle, amount: f32) {
+pub fn add_stance(h: &FieldInsHandle, poise: f32) {
+    // bosses without a poise value count as 100
+    let max = toughness_of(h).map(|(_, max)| max).filter(|m| *m > 1.0).unwrap_or(100.0);
+    let amount = poise / max.clamp(STANCE_POISE.0, STANCE_POISE.1) * 100.0;
     let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let k = key(h);
     if st.open.iter().any(|(o, _)| key(o) == k) {
