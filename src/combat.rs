@@ -114,6 +114,7 @@ const _: () = assert!(size_of::<SpawnRequest>() == 0x110);
 const BULLET_DAMAGE: u16 = 10;
 /// Share of the normal damage bosses (anything with a boss health bar) take.
 const BOSS_FACTOR: f32 = 0.05;
+const INVADER_FACTOR: f32 = 0.25;
 
 /// Team types on the player's side (the player, co-op phantoms, summons and spirit ashes): Mario
 /// doesn't hurt those. Everyone else can be hit, friendly NPCs included, like with a weapon.
@@ -235,6 +236,12 @@ fn handle_key(h: &FieldInsHandle) -> u64 {
     unsafe { std::mem::transmute_copy::<FieldInsHandle, u64>(h) }
 }
 
+/// Enemies and NPCs, the red NPC invaders included; some bosses (Margit) are type 7. Never the
+/// player, phantoms or the ghost kinds (bloodstains, messages, graces).
+pub fn hittable(t: ChrType) -> bool {
+    matches!(t, ChrType::Npc | ChrType::Unk6 | ChrType::Unk7 | ChrType::Unk9 | ChrType::Unk12 | ChrType::BloodyFingerNpc | ChrType::RecusantNpc)
+}
+
 /// Characters within `range` metres of `center` (not the player, alive).
 pub fn nearby(center: &HavokPosition, range: f32, origin: [f32; 3]) -> Vec<Target> {
     let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return Vec::new() };
@@ -242,9 +249,7 @@ pub fn nearby(center: &HavokPosition, range: f32, origin: [f32; 3]) -> Vec<Targe
     for set in wcm.chr_sets.iter().flatten() {
         for chr in set.characters() {
             let chr: &ChrIns = chr;
-            // enemies and NPCs; some bosses (Margit) are type 7. Never the player, phantoms or
-            // the ghost kinds (bloodstains, messages, graces)
-            if !matches!(chr.chr_type, ChrType::Npc | ChrType::Unk6 | ChrType::Unk7 | ChrType::Unk9 | ChrType::Unk12) {
+            if !hittable(chr.chr_type) {
                 // diagnostics: what else is near Mario (once each)
                 let p = chr.modules.physics.position;
                 let (dx, dz) = (p.0 - center.0, p.2 - center.2);
@@ -516,6 +521,10 @@ fn take_share(handle: &FieldInsHandle, attack: Attack) -> bool {
             log(format!("combat: boss poise {t:.0}/{tmax:.0}"));
         }
         crate::swing::add_stance(handle, attack.spec().3);
+    }
+    // the red NPC invaders are fights of their own, not two-hit mobs
+    if !boss && matches!(chr.chr_type, ChrType::BloodyFingerNpc | ChrType::RecusantNpc) {
+        pct *= config_f32("invader_damage_factor", INVADER_FACTOR);
     }
     let data = &mut chr.modules.data;
     let (hp, max) = (data.hp, data.max_hp.max(1));

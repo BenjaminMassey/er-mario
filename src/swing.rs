@@ -151,7 +151,7 @@ pub fn harmless(mario: Vec3) -> bool {
             if key(&chr.field_ins_handle) == key(&boss) || chr.modules.data.hp <= 0 || crate::combat::own_side(chr.team_type) {
                 continue;
             }
-            if !matches!(chr.chr_type, eldenring::cs::ChrType::Npc | eldenring::cs::ChrType::Unk6 | eldenring::cs::ChrType::Unk7 | eldenring::cs::ChrType::Unk9 | eldenring::cs::ChrType::Unk12) {
+            if !crate::combat::hittable(chr.chr_type) {
                 continue;
             }
             let q = chr.modules.physics.position;

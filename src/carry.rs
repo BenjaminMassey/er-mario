@@ -132,7 +132,7 @@ pub fn harmless(mario: Vec3) -> bool {
             }
             if key(&chr.field_ins_handle) == mob {
                 mob_near = true;
-            } else if matches!(chr.chr_type, eldenring::cs::ChrType::Npc | eldenring::cs::ChrType::Unk6 | eldenring::cs::ChrType::Unk7 | eldenring::cs::ChrType::Unk9 | eldenring::cs::ChrType::Unk12) {
+            } else if crate::combat::hittable(chr.chr_type) {
                 other_near = true;
             }
         }
@@ -157,12 +157,12 @@ pub fn reset() {
 
 /// Another enemy the thrown one (at `p`) runs into: within a body's width, overlapping in height.
 fn bumped(mob: &FieldInsHandle, p: Vec3) -> Option<FieldInsHandle> {
-    use eldenring::cs::{ChrIns, ChrType};
+    use eldenring::cs::ChrIns;
     let wcm = unsafe { WorldChrMan::instance() }.ok()?;
     for set in wcm.chr_sets.iter().flatten() {
         for chr in set.characters() {
             let chr: &ChrIns = chr;
-            if !matches!(chr.chr_type, ChrType::Npc | ChrType::Unk6 | ChrType::Unk7 | ChrType::Unk9 | ChrType::Unk12)
+            if !crate::combat::hittable(chr.chr_type)
                 || key(&chr.field_ins_handle) == key(mob)
                 || chr.modules.data.hp <= 0
                 || crate::combat::own_side(chr.team_type)
