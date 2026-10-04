@@ -46,6 +46,59 @@ impl Image {
     }
 }
 
+/// What's visible of `src` (premultiplied), scaled to fill most of a w x h card and centred, as
+/// straight-alpha RGBA.
+pub fn fit(src: &Image, w: usize, h: usize) -> Vec<u8> {
+    let seen = |x: usize, y: usize| src.px[y * src.w + x][3] > 0.03;
+    let xs: Vec<usize> = (0..src.w).filter(|&x| (0..src.h).any(|y| seen(x, y))).collect();
+    let ys: Vec<usize> = (0..src.h).filter(|&y| (0..src.w).any(|x| seen(x, y))).collect();
+    let (Some(&x0), Some(&x1), Some(&y0), Some(&y1)) = (xs.first(), xs.last(), ys.first(), ys.last()) else {
+        return vec![0; w * h * 4];
+    };
+    let (bw, bh) = ((x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32);
+    let scale = (w as f32 * 0.94 / bw).min(h as f32 * 0.94 / bh);
+    // shrinking: average the source area under each pixel (steps of the bilinear tap)
+    let taps = (1.0 / scale).ceil().max(1.0) as usize;
+    let at = |x: f32, y: f32| -> [f32; 4] {
+        if x < -0.5 || y < -0.5 || x > src.w as f32 - 0.5 || y > src.h as f32 - 0.5 {
+            return [0.0; 4];
+        }
+        let (x, y) = (x.clamp(0.0, (src.w - 1) as f32), y.clamp(0.0, (src.h - 1) as f32));
+        let (xa, ya) = (x.floor() as usize, y.floor() as usize);
+        let (xb, yb) = ((xa + 1).min(src.w - 1), (ya + 1).min(src.h - 1));
+        let (fx, fy) = (x - xa as f32, y - ya as f32);
+        let p = |x: usize, y: usize| src.px[y * src.w + x];
+        std::array::from_fn(|c| {
+            p(xa, ya)[c] * (1.0 - fx) * (1.0 - fy) + p(xb, ya)[c] * fx * (1.0 - fy) + p(xa, yb)[c] * (1.0 - fx) * fy + p(xb, yb)[c] * fx * fy
+        })
+    };
+    let (cx, cy) = (x0 as f32 + bw / 2.0, y0 as f32 + bh / 2.0);
+    let mut out = Image::new(w, h, [0.0; 4]);
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0.0f32; 4];
+            for j in 0..taps {
+                for i in 0..taps {
+                    let sx = cx + (x as f32 + (i as f32 + 0.5) / taps as f32 - w as f32 / 2.0) / scale - 0.5;
+                    let sy = cy + (y as f32 + (j as f32 + 0.5) / taps as f32 - h as f32 / 2.0) / scale - 0.5;
+                    let p = at(sx, sy);
+                    for c in 0..4 {
+                        acc[c] += p[c];
+                    }
+                }
+            }
+            let mut p = acc.map(|v| v / (taps * taps) as f32);
+            if p[3] > 0.0 {
+                for c in 0..3 {
+                    p[c] /= p[3];
+                }
+            }
+            out.px[y * w + x] = p;
+        }
+    }
+    out.rgba8()
+}
+
 /// Bilinear resample of an atlas cell (premultiplied, like Pillow does for RGBA).
 fn cell_resized(atlas: &[u8], cell: usize, size: usize) -> Vec<[f32; 4]> {
     let at = |x: usize, y: usize| {
@@ -265,23 +318,44 @@ pub const ICON_RECTS: [(usize, usize); 4] = [(1312, 820), (1312, 656), (1312, 49
 
 /// Paints the icons (cap, overalls, gloves, shoes; 160x160 RGBA) into the menu atlas texture.
 pub fn patch_icon_atlas(tpf: &[u8], icons: &[Vec<u8>; 4]) -> Result<Vec<u8>, String> {
-    let tex = tpf_textures(tpf).into_iter().find(|t| t.name == ICON_ATLAS).ok_or("icon atlas not found")?;
-    let dds = &tpf[tex.off..tex.off + tex.size];
-    let (h, w) = (u32_at(dds, 12), u32_at(dds, 16));
-    // a wrong header read once made a gigantic image: check everything before touching it
-    if (w, h) != (4096, 2048) || &dds[84..88] != b"DX10" || u32_at(dds, 128) != 98 || tex.size - 148 < w * h {
-        return Err("icon atlas is not the expected texture".into());
-    }
     let mut t = tpf.to_vec();
-    let data = tex.off + 148;
-    let row_blocks = w / 4;
-    for (icon, &(x, y)) in icons.iter().zip(ICON_RECTS.iter()) {
-        let blocks = bc7_mode6(icon, SPRITE, SPRITE);
-        let row = SPRITE / 4 * 16;
-        for j in 0..SPRITE / 4 {
-            let start = data + ((y / 4 + j) * row_blocks + x / 4) * 16;
-            t[start..start + row].copy_from_slice(&blocks[j * row..(j + 1) * row]);
-        }
+    for (icon, &at) in icons.iter().zip(ICON_RECTS.iter()) {
+        paint(&mut t, ICON_ATLAS, (4096, 2048), at, icon, (SPRITE, SPRITE))?;
     }
     Ok(t)
+}
+
+const PRESET_ATLAS: &str = "SB_Preset";
+/// The Vagabond's card (MENU_Ch_01 in SB_Preset.layout) in the hi and low atlas: its corner and
+/// the atlas size. The low one is half size.
+pub const PORTRAIT_AT: [((usize, usize), (usize, usize)); 2] = [((0, 1372), (4096, 4096)), ((664, 800), (4096, 2048))];
+
+/// Paints Mario over the Vagabond's character creation card. `quality` 0 hi, 1 low.
+pub fn patch_portrait(tpf: &mut [u8], quality: usize, rgba: &[u8], size: (usize, usize)) -> Result<(), String> {
+    let (at, atlas) = PORTRAIT_AT[quality];
+    paint(tpf, PRESET_ATLAS, atlas, at, rgba, size)
+}
+
+/// Re-encodes the BC7 blocks of one rect (whole blocks: x, y, w, h multiples of 4) in a texture
+/// of the menu tpf; the rest stays bit-identical.
+fn paint(t: &mut [u8], name: &str, expect: (usize, usize), (x, y): (usize, usize), rgba: &[u8], (pw, ph): (usize, usize)) -> Result<(), String> {
+    let tex = tpf_textures(t).into_iter().find(|t| t.name == name).ok_or(format!("{name} not found"))?;
+    let dds = &t[tex.off..tex.off + tex.size];
+    let (h, w) = (u32_at(dds, 12), u32_at(dds, 16));
+    // a wrong header read once made a gigantic image: check everything before touching it
+    if (w, h) != expect || &dds[84..88] != b"DX10" || u32_at(dds, 128) != 98 || tex.size - 148 < w * h {
+        return Err(format!("{name} is not the expected texture"));
+    }
+    if x % 4 != 0 || y % 4 != 0 || pw % 4 != 0 || ph % 4 != 0 || x + pw > w || y + ph > h || rgba.len() != pw * ph * 4 {
+        return Err(format!("{name}: bad rect"));
+    }
+    let data = tex.off + 148;
+    let row_blocks = w / 4;
+    let blocks = bc7_mode6(rgba, pw, ph);
+    let row = pw / 4 * 16;
+    for j in 0..ph / 4 {
+        let start = data + ((y / 4 + j) * row_blocks + x / 4) * 16;
+        t[start..start + row].copy_from_slice(&blocks[j * row..(j + 1) * row]);
+    }
+    Ok(())
 }

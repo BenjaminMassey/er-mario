@@ -26,6 +26,8 @@ struct RTri {
     uv: [[f64; 2]; 3],
     col: [DVec3; 3],
     textured: bool,
+    /// the atlas cell its texture is in
+    cell: usize,
 }
 
 fn prepare(model: &MarioModel, t: &Tri) -> RTri {
@@ -41,7 +43,9 @@ fn prepare(model: &MarioModel, t: &Tri) -> RTri {
             v[0] -= 2.0 / CELLS as f64;
         }
     }
+    let cell = ((uv.iter().map(|v| v[0]).sum::<f64>() / 3.0 * CELLS as f64).floor().max(0.0) as usize).min(CELLS - 1);
     RTri {
+        cell,
         part: t.part,
         p: t.world.map(|v| DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64)),
         n: t.normal.map(|v| {
@@ -67,7 +71,8 @@ fn sample(atlas: &[u8], u: f64, v: f64) -> [f64; 4] {
     std::array::from_fn(|k| a[k] * (1.0 - fx) * (1.0 - fy) + b[k] * fx * (1.0 - fy) + c[k] * (1.0 - fx) * fy + d[k] * fx * fy)
 }
 
-fn render(model: &MarioModel, parts: &[i32], (yaw, pitch): (f64, f64)) -> Vec<u8> {
+/// Supersampled, premultiplied by coverage: `finish` makes the final image.
+fn raster(model: &MarioModel, parts: &[i32], (yaw, pitch): (f64, f64), (w, h): (usize, usize)) -> Image {
     let mut tris: Vec<RTri> = model.tris.iter().filter(|t| parts.contains(&t.part)).map(|t| prepare(model, t)).collect();
     if parts.len() == 2 {
         // a pair (hands, feet): pull the two pieces together so they fill the icon
@@ -98,19 +103,18 @@ fn render(model: &MarioModel, parts: &[i32], (yaw, pitch): (f64, f64)) -> Vec<u8
         t.p = t.p.map(|p| rot * (p - center));
         t.n = t.n.map(|n| rot * n);
     }
-    let ss = SIZE * SS;
-    let ext = tris.iter().flat_map(|t| t.p).map(|p| p.x.abs().max(p.y.abs())).fold(1e-9, f64::max);
-    let scale = ss as f64 * 0.44 / ext;
-    let mut zbuf = vec![f64::INFINITY; ss * ss];
-    let mut img = Image::new(ss, ss, [0.0; 4]);
+    let (ex, ey) = tris.iter().flat_map(|t| t.p).fold((1e-9, 1e-9), |(x, y): (f64, f64), p| (x.max(p.x.abs()), y.max(p.y.abs())));
+    let scale = (w as f64 * 0.44 / ex).min(h as f64 * 0.44 / ey);
+    let mut zbuf = vec![f64::INFINITY; w * h];
+    let mut img = Image::new(w, h, [0.0; 4]);
     let light = DVec3::new(-0.5, 0.7, -0.6).normalize();
     for t in &tris {
-        let sx = t.p.map(|p| ss as f64 / 2.0 + p.x * scale);
-        let sy = t.p.map(|p| ss as f64 / 2.0 - p.y * scale);
+        let sx = t.p.map(|p| w as f64 / 2.0 + p.x * scale);
+        let sy = t.p.map(|p| h as f64 / 2.0 - p.y * scale);
         let x0 = sx.iter().copied().fold(f64::MAX, f64::min).floor().max(0.0) as i64;
-        let x1 = (sx.iter().copied().fold(f64::MIN, f64::max).ceil() as i64).min(ss as i64 - 1);
+        let x1 = (sx.iter().copied().fold(f64::MIN, f64::max).ceil() as i64).min(w as i64 - 1);
         let y0 = sy.iter().copied().fold(f64::MAX, f64::min).floor().max(0.0) as i64;
-        let y1 = (sy.iter().copied().fold(f64::MIN, f64::max).ceil() as i64).min(ss as i64 - 1);
+        let y1 = (sy.iter().copied().fold(f64::MIN, f64::max).ceil() as i64).min(h as i64 - 1);
         let d = (sy[1] - sy[2]) * (sx[0] - sx[2]) + (sx[2] - sx[1]) * (sy[0] - sy[2]);
         if x1 < x0 || y1 < y0 || d.abs() < 1e-9 {
             continue;
@@ -130,14 +134,18 @@ fn render(model: &MarioModel, parts: &[i32], (yaw, pitch): (f64, f64)) -> Vec<u8
                 if t.textured {
                     z -= 0.5; // SM64 decals (eyes, logo, buttons) sit on the surface
                 }
-                let i = py as usize * ss + px as usize;
+                let i = py as usize * w + px as usize;
                 if z >= zbuf[i] {
                     continue;
                 }
                 zbuf[i] = z;
                 let mut c = bary(t.col);
                 if t.textured {
-                    let u = (0..3).map(|k| ws[k] * t.uv[k][0]).sum();
+                    // SM64 clamps its textures: UVs past the edge (the eyes' corners) must not
+                    // run into the next cell of the atlas (the half-closed eye's lash)
+                    let half = 0.5 / (64 * CELLS) as f64;
+                    let u: f64 = (0..3).map(|k| ws[k] * t.uv[k][0]).sum();
+                    let u = u.clamp(t.cell as f64 / CELLS as f64 + half, (t.cell + 1) as f64 / CELLS as f64 - half);
                     let v = (0..3).map(|k| ws[k] * t.uv[k][1]).sum();
                     let s = sample(&model.atlas, u, v);
                     c = c * (1.0 - s[3]) + DVec3::new(s[0], s[1], s[2]) * s[3];
@@ -154,8 +162,13 @@ fn render(model: &MarioModel, parts: &[i32], (yaw, pitch): (f64, f64)) -> Vec<u8
             }
         }
     }
+    img
+}
+
+/// Shrinks a raster by `f` to straight-alpha RGBA.
+fn finish(img: &Image, f: usize) -> Vec<u8> {
     // straight alpha after averaging: un-premultiply the edge pixels
-    let mut small = img.shrink(SS);
+    let mut small = img.shrink(f);
     for p in &mut small.px {
         if p[3] > 0.0 {
             for c in 0..3 {
@@ -168,5 +181,16 @@ fn render(model: &MarioModel, parts: &[i32], (yaw, pitch): (f64, f64)) -> Vec<u8
 
 /// cap, overalls, gloves, shoes (160x160 RGBA each)
 pub fn render_all(model: &MarioModel) -> [Vec<u8>; 4] {
-    ICONS.map(|(parts, angles)| render(model, parts, angles))
+    ICONS.map(|(parts, angles)| finish(&raster(model, parts, angles, (SIZE * SS, SIZE * SS)), SS))
+}
+
+/// The Vagabond's card in character creation (SB_Preset MENU_Ch_01), hi and low: 1064x1368 and
+/// half that, the sprite's size down to whole BC7 blocks.
+pub const PORTRAIT: (usize, usize) = (1064, 1368);
+
+/// All of Mario for that card, as (hi, low) RGBA.
+pub fn portrait(model: &MarioModel) -> (Vec<u8>, Vec<u8>) {
+    let parts: Vec<i32> = (1..16).collect();
+    let img = raster(model, &parts, (160.0, 6.0), (PORTRAIT.0 * 2, PORTRAIT.1 * 2));
+    (finish(&img, 2), finish(&img, 4))
 }

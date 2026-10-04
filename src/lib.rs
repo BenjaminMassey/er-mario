@@ -300,6 +300,7 @@ const SOUND_HEART: i32 = 0x3064_C081;
 /// states. Runs after the menu manager, before the HUD is drawn.
 fn hud_task() {
     static HIDDEN: AtomicBool = AtomicBool::new(false);
+    names::class_name();
     let Ok(fe) = (unsafe { eldenring::cs::CSFeManImp::instance_mut() }) else { return };
     use eldenring::cs::CSFeManHudState as Hud;
     let mario = ENABLED.load(Ordering::Relaxed) && IN_WORLD.load(Ordering::Relaxed);

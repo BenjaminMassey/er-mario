@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{log, paths};
 
 /// Bump when the generated files change, so existing installs rebuild.
-const VERSION: &str = "er-mario assets 2";
+const VERSION: &str = "er-mario assets 3";
 const STAMP: &str = "package/.built";
 const PIECES: [&str; 4] = ["hd", "bd", "am", "lg"];
 const QUALITIES: [&str; 2] = ["hi", "low"];
@@ -43,9 +43,52 @@ fn outputs() -> Vec<String> {
     out
 }
 
+/// A picture of the player's own for the Vagabond's card in character creation, next to the DLL.
+/// Without it Mario is rendered from the ROM's model.
+const PORTRAIT_FILE: &str = "portrait.png";
+
+/// What the package was built from: a new version or another portrait file builds it again.
+fn stamp() -> String {
+    match std::fs::metadata(paths::file(PORTRAIT_FILE)) {
+        Ok(m) => format!("{VERSION}, portrait {}", m.len()),
+        Err(_) => VERSION.to_string(),
+    }
+}
+
+/// portrait.png fitted into the card, as (hi, low) RGBA; None without the file.
+fn own_portrait() -> Option<Result<(Vec<u8>, Vec<u8>), String>> {
+    let file = std::fs::File::open(paths::file(PORTRAIT_FILE)).ok()?;
+    Some((|| {
+        let mut decoder = png::Decoder::new(file);
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+        let (w, h) = (info.width as usize, info.height as usize);
+        let n = info.color_type.samples();
+        if w == 0 || h == 0 || w > 8192 || h > 8192 {
+            return Err(format!("{w}x{h} is no size for a portrait"));
+        }
+        let mut src = tex::Image::new(w, h, [0.0; 4]);
+        for (i, p) in buf[..w * h * n].chunks_exact(n).enumerate() {
+            let v = |k: usize| p[k] as f32 / 255.0;
+            let (rgb, a) = match n {
+                1 => ([v(0); 3], 1.0),
+                2 => ([v(0); 3], v(1)),
+                3 => ([v(0), v(1), v(2)], 1.0),
+                _ => ([v(0), v(1), v(2)], v(3)),
+            };
+            // premultiplied, so transparent pixels don't bleed their colour into the edges
+            src.px[i] = [rgb[0] * a, rgb[1] * a, rgb[2] * a, a];
+        }
+        let (cw, ch) = icons::PORTRAIT;
+        Ok((tex::fit(&src, cw, ch), tex::fit(&src, cw / 2, ch / 2)))
+    })())
+}
+
 /// Checks the package once at startup. Returns true if it has to be built.
 pub fn check() -> bool {
-    let complete = std::fs::read_to_string(paths::file(STAMP)).is_ok_and(|s| s.trim() == VERSION)
+    let complete = std::fs::read_to_string(paths::file(STAMP)).is_ok_and(|s| s.trim() == stamp())
         && outputs().iter().all(|f| paths::file(f).is_file());
     READY.store(complete, Ordering::Relaxed);
     !complete
@@ -119,11 +162,23 @@ pub fn build(model: &model::MarioModel) -> Result<(), String> {
     let icons = icons::render_all(model);
     log(format!("assets: icons rendered ({:.1} s)", t0.elapsed().as_secs_f32()));
     step(0.85, "Saving the menu icons");
-    for q in QUALITIES {
+    let (hi, low) = match own_portrait() {
+        Some(Ok(p)) => p,
+        Some(Err(e)) => {
+            log(format!("assets: {PORTRAIT_FILE} not used: {e}"));
+            icons::portrait(model)
+        }
+        None => icons::portrait(model),
+    };
+    log(format!("assets: portrait done ({:.1} s)", t0.elapsed().as_secs_f32()));
+    for (i, q) in QUALITIES.iter().enumerate() {
         let tpf = dcx::decompress(&archives.read(&format!("/menu/{q}/01_common.tpf.dcx"))?)?;
-        write(&format!("package/menu/{q}/01_common.tpf.dcx"), &dcx::compress(&tex::patch_icon_atlas(&tpf, &icons)?)?)?;
+        let mut tpf = tex::patch_icon_atlas(&tpf, &icons)?;
+        let (w, h) = icons::PORTRAIT;
+        tex::patch_portrait(&mut tpf, i, if i == 0 { &hi } else { &low }, (w >> i, h >> i))?;
+        write(&format!("package/menu/{q}/01_common.tpf.dcx"), &dcx::compress(&tpf)?)?;
     }
-    write(STAMP, VERSION.as_bytes())?;
+    write(STAMP, stamp().as_bytes())?;
     log(format!("assets: all built in {:.1} s", t0.elapsed().as_secs_f32()));
     Ok(())
 }

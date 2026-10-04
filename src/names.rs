@@ -224,6 +224,25 @@ pub fn override_text(text: &str, replacement: &str) -> Vec<(usize, u64)> {
         .collect()
 }
 
+/// The Vagabond is Mario in character creation too (the card's picture is his, assets). Tried
+/// until the text is loaded; only finds the English name.
+pub fn class_name() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    if DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed().as_secs_f32() < 2.0) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    if !override_text("Vagabond", "Mario").is_empty() {
+        DONE.store(true, Ordering::Relaxed);
+    }
+}
+
 pub fn restore(patches: &[(usize, u64)]) {
     for &(slot, original) in patches {
         unsafe { *(slot as *mut u64) = original };
