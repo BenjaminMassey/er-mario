@@ -95,11 +95,14 @@ The model code isn't part of this repository; it gets compiled into the DLL.
 the old DLL first, so it works while the game is running; the next start loads the new one).
 The release zip is that folder without the generated `package` and `logs` folders.
 
+
+
 ## Support
 
 I make mods in my free time. If you like what I do and want to support it, you can
 [donate here](https://www.paypal.com/donate/?hosted_button_id=QXEBJARMQW59E). Totally optional,
 the mod is and stays free.
+
 
 ## License
 
