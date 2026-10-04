@@ -306,14 +306,19 @@ fn hud_task() {
     // HideAll: nothing of Elden Ring's HUD. It also hides the subtitle display, and a dialogue line
     // can only be skipped while it's shown, so during a conversation (the game stops taking the
     // character's actions, but no menu is up and the world runs) it's PopupMenu: subtitles on.
-    let talk_id = talk_line();
-    {
-        static LAST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(i32::MIN);
-        if LAST.swap(talk_id, Ordering::Relaxed) != talk_id {
-            dlog(format!("hud: talk line {talk_id}"));
+    // the subtitle box is up, or was a moment ago (the gap between two lines)
+    let line = {
+        static SEEN: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        // the box only comes up once the HUD lets it, so a new talk event opens the HUD first
+        static EVENTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let events = talk_events();
+        if subtitle_up() || EVENTS.swap(events, Ordering::Relaxed) != events {
+            *seen = Some(std::time::Instant::now());
         }
-    }
-    let talking = talk_id > 0 || (MENU_OPEN.load(Ordering::Relaxed) && !game_menu_open() && !WORLD_PAUSED.load(Ordering::Relaxed));
+        seen.is_some_and(|t| t.elapsed().as_secs_f32() < SUBTITLE_GAP)
+    };
+    let talking = line || (MENU_OPEN.load(Ordering::Relaxed) && !game_menu_open() && !WORLD_PAUSED.load(Ordering::Relaxed));
     {
         static WAS: AtomicBool = AtomicBool::new(false);
         if WAS.swap(talking, Ordering::Relaxed) != talking {
@@ -352,9 +357,17 @@ fn game_menu_job() -> usize {
         .unwrap_or(0)
 }
 
-/// The dialogue line the popup menu is showing (its TalkParam row), if the game has one up.
-fn talk_line() -> i32 {
-    unsafe { eldenring::cs::CSMenuManImp::instance() }.ok().and_then(|m| m.popup_menu).map(|p| unsafe { p.as_ref() }.current_talk_id).unwrap_or(-1)
+/// UI element 2 in the menu manager's table is the subtitle box.
+const UI_SUBTITLE: usize = 2;
+const SUBTITLE_GAP: f32 = 3.0;
+
+fn subtitle_up() -> bool {
+    unsafe { eldenring::cs::CSMenuManImp::instance() }.is_ok_and(|m| m.ui_states[UI_SUBTITLE].visible())
+}
+
+/// Counts up with every talk or menu the popup menu starts.
+fn talk_events() -> u32 {
+    unsafe { eldenring::cs::CSMenuManImp::instance() }.ok().and_then(|m| m.popup_menu).map(|p| unsafe { *((p.as_ptr() as usize + 0x168) as *const u32) }).unwrap_or(0)
 }
 
 static WORLD_PAUSED: AtomicBool = AtomicBool::new(false);
