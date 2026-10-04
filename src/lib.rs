@@ -24,6 +24,7 @@ mod names;
 mod notes;
 mod paths;
 mod sm64;
+mod squish;
 mod swing;
 mod stats;
 mod update;
@@ -1755,6 +1756,7 @@ fn frame(data: &FD4TaskData) {
     hud::set(wedges.min(8), hide_why, true);
     // the tail swing: watch the bosses' stance, carry / throw / fly the grabbed one
     swing::watch_stances(&combat::boss_handles());
+    squish::tick();
     {
         let me = to_er(m.origin, m.state.position);
         let havok = unsafe { eldenring::cs::CSHavokMan::instance() }.ok();

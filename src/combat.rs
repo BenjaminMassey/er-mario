@@ -631,6 +631,11 @@ impl Combat {
                     continue;
                 }
                 self.victims.insert(target.key, (*handle, tick));
+                match attack {
+                    Attack::Stomp => crate::squish::start(handle, 0.35, 0.0),
+                    Attack::GroundPound => crate::squish::start(handle, 0.8, 1.0),
+                    _ => {}
+                }
                 if take_share(handle, attack) {
                     self.finishing.entry(target.key).or_insert((*handle, tick));
                 }
