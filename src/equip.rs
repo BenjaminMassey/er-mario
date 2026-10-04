@@ -140,6 +140,54 @@ fn set_vagabond_model(model: u16) -> bool {
     true
 }
 
+/// The Vagabond's starting template (CharaInitParam).
+const VAGABOND_CLASS: u32 = 3000;
+
+/// Mario starts without the Vagabond's sword, halberd and shield: he never uses them, and in
+/// character creation they'd float next to him (weapons don't follow the bones Mario is posed on).
+fn mario_class() {
+    use eldenring::cs::{CharaInitParam, SoloParamRepository};
+    let Ok(repo) = (unsafe { SoloParamRepository::instance_mut() }) else { return };
+    let Some(row) = repo.get_mut::<CharaInitParam>(VAGABOND_CLASS) else { return };
+    if row.equip_armer() != (VAGABOND[1] & !PROTECTOR) as i32 || (row.equip_wep_right() == -1 && row.equip_wep_left() == -1) {
+        return;
+    }
+    log(format!(
+        "equip: the Vagabond template loses its weapons ({} {} {} / {} {} {})",
+        row.equip_wep_right(),
+        row.equip_subwep_right(),
+        row.equip_subwep_right3(),
+        row.equip_wep_left(),
+        row.equip_subwep_left(),
+        row.equip_subwep_left3()
+    ));
+    row.set_equip_wep_right(-1);
+    row.set_equip_subwep_right(-1);
+    row.set_equip_subwep_right3(-1);
+    row.set_equip_wep_left(-1);
+    row.set_equip_subwep_left(-1);
+    row.set_equip_subwep_left3(-1);
+}
+
+/// Outside the world (character creation): Mario's model on the Vagabond set, so the preview
+/// loads it, and whether a character model on screen wears that set.
+pub fn menu_mario() -> bool {
+    use eldenring::cs::{EquipParamProtector, SoloParamRepository};
+    let Ok(repo) = (unsafe { SoloParamRepository::instance() }) else { return false };
+    // (asking for a row before the params are loaded panics)
+    if repo.solo_param_holders[1].get_res_cap(0).is_none() {
+        return false;
+    }
+    if repo.get::<EquipParamProtector>(VAGABOND[1]).is_none_or(|row| row.equip_model_id() != MARIO_MODEL) {
+        if !set_vagabond_model(MARIO_MODEL) {
+            return false;
+        }
+        log("equip: Mario's model on the Vagabond set (menus)");
+    }
+    mario_class();
+    crate::engine_mario::menu_models(VAGABOND[1] as i32)
+}
+
 /// Set while the armour slots are being emptied (so that equipping the set afterwards loads the
 /// model that was just switched); the game applies equips a little later, so this is a phase the
 /// lock works through, not a one-off call.

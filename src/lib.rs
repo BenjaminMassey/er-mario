@@ -13,6 +13,7 @@ mod engine_mario;
 mod equip;
 mod kbd;
 mod lakitu;
+mod menu_mario;
 mod havok_col;
 mod explore;
 mod gameover;
@@ -301,6 +302,10 @@ const SOUND_HEART: i32 = 0x3064_C081;
 fn hud_task() {
     static HIDDEN: AtomicBool = AtomicBool::new(false);
     names::class_name();
+    // character creation: the Vagabond's preview is Mario too
+    let menu = !IN_WORLD.load(Ordering::Relaxed) && WANTED.load(Ordering::Relaxed) && equip::menu_mario();
+    engine_mario::MENU.store(menu, Ordering::Relaxed);
+    menu_mario::tick(menu);
     let Ok(fe) = (unsafe { eldenring::cs::CSFeManImp::instance_mut() }) else { return };
     use eldenring::cs::CSFeManHudState as Hud;
     let mario = ENABLED.load(Ordering::Relaxed) && IN_WORLD.load(Ordering::Relaxed);
@@ -2926,6 +2931,7 @@ pub unsafe extern "C" fn DllMain(hmodule: usize, reason: u32) -> bool {
         }
         unsafe { gameover::install_hook() };
         unsafe { engine_mario::install_anim_hook() };
+        unsafe { engine_mario::install_menu_hook() };
         equip::init();
         lakitu::load_setting();
         std::thread::spawn(startup);

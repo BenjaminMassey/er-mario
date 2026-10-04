@@ -248,7 +248,7 @@ pub fn apply(chr: usize) {
     // then only re-validate when one of the pointers changes.
     let raw = |a: usize| unsafe { *(a as *const usize) };
     let Some(layout) = pose_layout(chr, raw) else { return };
-    let PoseLayout { imp, skeleton, model, local, parents, count } = layout;
+    let PoseLayout { imp, skeleton, .. } = layout;
     let mut guard = BONES.lock().unwrap_or_else(|e| e.into_inner());
     if guard.as_ref().is_none_or(|b| b.skeleton != skeleton) {
         *guard = map_bones(skeleton);
@@ -260,6 +260,196 @@ pub fn apply(chr: usize) {
         }
         return;
     };
+    if let Some(head) = write_pose(&layout, &map.bones, &pose, false) {
+        *LAST_HEAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(head);
+    }
+}
+
+/// Mario's pose for a skeleton outside the world (the character creation preview, menu_mario).
+pub static STANDING: Mutex<Option<[PartPose; PARTS]>> = Mutex::new(None);
+
+pub fn set_standing(parts: &[PartPose; PARTS]) {
+    // facing the camera
+    let pose = to_character(parts, Quat::from_rotation_y(std::f32::consts::PI));
+    *STANDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(pose);
+}
+
+/// A character model in the menus wears the Mario set (set every frame, lib.rs).
+pub static MENU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// hkaPose::syncModelSpace: every skeleton's model pose goes through it, the menus' too (the
+/// character creation preview isn't a ChrIns and never reaches the animation job above).
+const SYNC_MODEL_RVA: usize = 0x16551c0;
+const SYNC_MODEL_CODE: [u8; 10] = [0x48, 0x83, 0xec, 0x18, 0x80, 0x79, 0x38, 0x00, 0x0f, 0x85];
+
+pub unsafe fn install_menu_hook() {
+    use ilhook::x64::{CallbackOption, HookFlags, hook_closure_retn};
+    let Ok(base) = (unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }) else { return };
+    let at = base.0 as usize + SYNC_MODEL_RVA;
+    if unsafe { *(at as *const [u8; 10]) } != SYNC_MODEL_CODE {
+        log("engine mario: pose sync not where it's expected, no Mario in character creation");
+        return;
+    }
+    let hook = |r: *mut ilhook::x64::Registers, original: usize| -> usize {
+        let pose = unsafe { (*r).rcx } as usize;
+        let sync: extern "win64" fn(usize) = unsafe { std::mem::transmute(original) };
+        sync(pose);
+        if MENU.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = std::panic::catch_unwind(|| menu_pose(pose));
+        }
+        0
+    };
+    match unsafe { hook_closure_retn(at, hook, CallbackOption::None, HookFlags::empty()) } {
+        Ok(h) => {
+            std::mem::forget(h);
+            log("engine mario: hooked the pose sync");
+        }
+        Err(e) => log(format!("engine mario: pose sync hook failed: {e:?}")),
+    }
+    let at = base.0 as usize + REND_UPDATE_RVA;
+    if unsafe { *(at as *const [u8; 16]) } != REND_UPDATE_CODE {
+        log("engine mario: menu model update not where it's expected, no Mario in character creation");
+        return;
+    }
+    let seen = |r: *mut ilhook::x64::Registers| {
+        let rend = unsafe { (*r).rcx } as usize;
+        let mut rends = RENDS.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if let Some(e) = rends.iter_mut().find(|e| e.0 == rend) {
+            e.1 = now;
+        } else if rends.len() < 16 {
+            rends.push((rend, now));
+        }
+    };
+    match unsafe { ilhook::x64::hook_closure_jmp_back(at, seen, CallbackOption::None, HookFlags::empty()) } {
+        Ok(h) => {
+            std::mem::forget(h);
+            log("engine mario: hooked the menu model update");
+        }
+        Err(e) => log(format!("engine mario: menu model hook failed: {e:?}")),
+    }
+}
+
+/// CSMenuAsmModelRend's update (its task at +0xe0 calls it every frame): the menus' character
+/// models. Character creation keeps four alive, a dressed and a bare one per body type, and shows
+/// one of them.
+const REND_UPDATE_RVA: usize = 0xbbbe00;
+const REND_UPDATE_CODE: [u8; 16] = [0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xd9, 0x48, 0x8b, 0xfa];
+/// The renderers updated lately: (address, when).
+static RENDS: Mutex<Vec<(usize, std::time::Instant)>> = Mutex::new(Vec::new());
+/// The pose importers of the renderers that wear the Mario set (refreshed by `menu_models`).
+static MARIO_IMPORTERS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Every frame outside the world: which of the menus' character models wear the Mario set. Only
+/// their skeletons get Mario's pose (the bare ones would be stretched over it). True if any does.
+pub fn menu_models(chest: i32) -> bool {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // (the walk below reads a lot of memory: a few times a second is plenty, models don't
+    // change faster)
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| t.elapsed().as_secs_f32() < 0.25) {
+            return !MARIO_IMPORTERS.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let rends: Vec<usize> = {
+        let mut r = RENDS.lock().unwrap_or_else(|e| e.into_inner());
+        r.retain(|e| e.1.elapsed().as_secs_f32() < 0.5);
+        r.iter().map(|e| e.0).collect()
+    };
+    let pointer = |at: usize| explore::read_u64(at).map(|p| p as usize).filter(|p| *p > 0x10000 && p % 8 == 0 && p >> 47 == 0);
+    static IMPORTER: AtomicUsize = AtomicUsize::new(0);
+    let is_importer = |p: usize| explore::read_u64(p).is_some_and(|v| v as usize == IMPORTER.load(Ordering::Relaxed));
+    let mut found = Vec::new();
+    for rend in rends {
+        // renderer +0x1ac the armour ids of its ChrAsm (head, chest, arms, legs from +0x1dc),
+        // +0x770 the body's model, +0x778 the armour's (its parts are models of their own)
+        if explore::read_u64(rend + 0x1e0).map(|v| v as u32 as i32) != Some(chest) {
+            continue;
+        }
+        // the body's pose importer: model +0x18 display entity, its +0x210 exporter, that one's
+        // +0x158 source
+        let body = pointer(rend + 0x770).and_then(|m| pointer(m + 0x18)).and_then(|e| pointer(e + 0x210)).and_then(|e| pointer(e + 0x158));
+        let Some(body) = body else { continue };
+        if IMPORTER.load(Ordering::Relaxed) == 0 {
+            if explore::class_of(body).as_deref() != Some("CS::CSFD4LocationHkaPoseImporter") {
+                continue;
+            }
+            IMPORTER.store(explore::read_u64(body).unwrap_or(0) as usize, Ordering::Relaxed);
+        }
+        if is_importer(body) {
+            found.push(body);
+        }
+        // the armour pieces keep theirs in different places (through their cloth, their
+        // location entities): any importer a piece points at, directly or one object on
+        let Some(asm) = pointer(rend + 0x778) else { continue };
+        for part in (0x08..0x200).step_by(8).filter_map(|off| pointer(asm + off)) {
+            if !explore::class_of(part).is_some_and(|c| c.ends_with("PartsModelIns")) {
+                continue;
+            }
+            for inner in (0x08..0x3b0).step_by(8).filter_map(|off| pointer(part + off)) {
+                if is_importer(inner) {
+                    found.push(inner);
+                } else {
+                    found.extend((0x08..0x220).step_by(8).filter_map(|off| pointer(inner + off)).filter(|p| is_importer(*p)));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    let mut known = MARIO_IMPORTERS.lock().unwrap_or_else(|e| e.into_inner());
+    if *known != found {
+        crate::dlog(format!("menu pose: Mario's skeletons {found:x?}"));
+        *known = found;
+    }
+    !known.is_empty()
+}
+
+/// A pose that was just synced outside the world: if it's in one of Mario's pose importers (the
+/// hkaPose is the importer's +0x48), Mario stands in it.
+fn menu_pose(pose: usize) {
+    let imp = pose.wrapping_sub(0x48);
+    if !MARIO_IMPORTERS.lock().unwrap_or_else(|e| e.into_inner()).contains(&imp) {
+        return;
+    }
+    let Some(stand) = *STANDING.lock().unwrap_or_else(|e| e.into_inner()) else { return };
+    let layout = (|| {
+        let skeleton = explore::read_u64(imp + 0x48)? as usize;
+        let model = explore::read_u64(imp + 0x60)? as usize;
+        let count = explore::read_u64(imp + 0x68)? as u32 as usize;
+        let local = explore::read_u64(imp + 0x50)? as usize;
+        let parents = explore::read_u64(skeleton + 0x20)? as usize;
+        (count > 0 && count <= 1024 && explore::readable(model, count * 0x30) && explore::readable(local, count * 0x30) && explore::readable(parents & !7, count * 2 + 8))
+            .then_some(PoseLayout { imp, skeleton, model, local, parents, count })
+    })();
+    let Some(layout) = layout else { return };
+    // (the two body types have their own skeletons)
+    static MAPS: Mutex<Vec<(usize, Option<[usize; PARTS]>)>> = Mutex::new(Vec::new());
+    let mut maps = MAPS.lock().unwrap_or_else(|e| e.into_inner());
+    let bones = match maps.iter().find(|m| m.0 == layout.skeleton) {
+        Some(m) => m.1,
+        None => {
+            let b = map_bones(layout.skeleton).map(|m| m.bones);
+            if maps.len() < 32 {
+                maps.push((layout.skeleton, b));
+            }
+            b
+        }
+    };
+    if let Some(bones) = bones {
+        write_pose(&layout, &bones, &stand, true);
+    }
+}
+
+/// Puts the part poses on their bones and hides the rest; returns where the head bone went.
+/// `away`: hidden bones also go far below, each hidden branch by its first bone (in the menus the
+/// weapons hang on theirs and don't shrink with them; in the world the game aims the camera at
+/// some, so they stay put there).
+fn write_pose(layout: &PoseLayout, bones: &[usize; PARTS], pose: &[PartPose; PARTS], away: bool) -> Option<[f32; 3]> {
+    let PoseLayout { model, local, parents, count, .. } = *layout;
     type Qs = (Vec3, Quat);
     let read = |base: usize, b: usize| -> Qs {
         let v = unsafe { *((base + b * 0x30) as *const [f32; 12]) };
@@ -275,7 +465,7 @@ pub fn apply(chr: usize) {
     // which hides everything else on the Tarnished: weapons, face, fingers...)
     let mut keep = [false; 512];
     for i in 1..PARTS {
-        let mut b = map.bones[i];
+        let mut b = bones[i];
         if b >= n {
             continue;
         }
@@ -311,7 +501,10 @@ pub fn apply(chr: usize) {
             None => {
                 // hidden: scaled to 0 where the animation puts it (not moved: the game aims the camera
                 // at bones like the head, e.g. when resting at a grace)
-                let l = read(local, b);
+                let mut l = read(local, b);
+                if away && (p < 0 || keep[p as usize]) {
+                    l.0.y -= 1000.0;
+                }
                 write(local, b, l, 0.0);
                 (parent.0 + parent.1 * l.0, (parent.1 * l.1).normalize())
             }
@@ -319,7 +512,5 @@ pub fn apply(chr: usize) {
         write(model, b, m, scale);
         world.push(m);
     }
-    if let Some(head) = world.get(map.bones[HEAD]) {
-        *LAST_HEAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(head.0.into());
-    }
+    world.get(bones[HEAD]).map(|head| head.0.into())
 }
