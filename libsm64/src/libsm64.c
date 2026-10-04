@@ -767,6 +767,13 @@ static struct MarioState *er_bind(int32_t marioId)
     return gMarioState;
 }
 
+// ER Mario: no sounds from the ticks in between (see play_sound).
+SM64_LIB_FN void sm64_er_mute(int32_t mute)
+{
+    extern int g_er_mute;
+    g_er_mute = mute;
+}
+
 // The floor under Mario is lava (the mod knows from the game's floor material): SM64's lava boost
 // (check_lava_boost), but one wedge of health instead of three: Elden Ring's lava pools are wide.
 // Does nothing in the air, so it can be called every tick.

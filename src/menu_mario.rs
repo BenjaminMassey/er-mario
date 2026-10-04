@@ -49,7 +49,10 @@ pub fn tick(on: bool) {
             ];
             unsafe {
                 sm64::sm64_static_surfaces_load(floor.as_ptr(), floor.len() as u32);
-                sm64::sm64_mario_create(0.0, 0.0, 0.0)
+                sm64::sm64_er_mute(1);
+                let id = sm64::sm64_mario_create(0.0, 0.0, 0.0);
+                sm64::sm64_er_mute(0);
+                id
             }
         })
         .filter(|id| *id >= 0);
@@ -60,9 +63,14 @@ pub fn tick(on: bool) {
         let parts = worker::call("menu tick", move |ctx| {
             let inputs = sm64::SM64MarioInputs::default();
             let mut state = sm64::SM64MarioState::default();
+            // (no audio runs in the menus: his yawns and snoring would wait for the world)
             {
                 let mut b = ctx.geo.buffers();
-                unsafe { sm64::sm64_mario_tick(id, &inputs, &mut state, &mut *b) };
+                unsafe {
+                    sm64::sm64_er_mute(1);
+                    sm64::sm64_mario_tick(id, &inputs, &mut state, &mut *b);
+                    sm64::sm64_er_mute(0);
+                }
             }
             let mut mats = vec![0f32; 64 * 16];
             let mut tri_part = vec![0i32; sm64::GEO_MAX_TRIANGLES];

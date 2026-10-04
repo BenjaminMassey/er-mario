@@ -169,6 +169,7 @@ unsafe extern "C" {
     pub fn sm64_er_set_head(active: i32, pitch: f32, yaw: f32);
     pub fn sm64_er_set_ladder(rate: f32);
     pub fn sm64_er_lava(id: i32);
+    pub fn sm64_er_mute(mute: i32);
     pub fn sm64_er_pick_up(id: i32);
     pub fn sm64_er_held(id: i32, pos: *mut f32) -> i32;
     pub fn sm64_er_drop(id: i32);
