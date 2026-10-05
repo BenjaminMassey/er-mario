@@ -717,6 +717,13 @@ impl Combat {
                     SCRIPTED.lock().unwrap_or_else(|e| e.into_inner()).push(*key);
                     return false;
                 }
+                // Nor while a cutscene plays or the world stands still, and the wait starts over
+                // after it: Malenia's second phase comes as a cutscene, set off by a hit on her
+                // at her last point (which the script keeps her at), with no animation to tell.
+                if crate::CUTSCENE_HIDE.load(std::sync::atomic::Ordering::Relaxed) || crate::WORLD_PAUSED.load(std::sync::atomic::Ordering::Relaxed) {
+                    *t = tick;
+                    return true;
+                }
                 // (the script reacts within a few frames: wait a little longer than for the rest)
                 if tick.wrapping_sub(*t) < BOSS_FINISH_TICKS {
                     return true;
