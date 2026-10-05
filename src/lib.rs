@@ -1384,6 +1384,75 @@ fn seat(mut parts: [engine_mario::PartPose; engine_mario::PARTS]) -> [engine_mar
     parts
 }
 
+/// Lava that does nothing, for the fights where the boss stands in it (`on`): the lava floors
+/// lose the effects they put on whoever stands on them (the burn among them, SpEffect 4101),
+/// and get them back when the fight is over. Returns `on`.
+fn safe_lava(on: bool) -> bool {
+    type Effects = [i32; 7];
+    static SAVED: Mutex<Option<Vec<(i32, Effects)>>> = Mutex::new(None);
+    /// Rykard's arena burns by an effect of its own (11954): every 1.1 s it sets off a fire
+    /// attack on whoever has it, 59 HP a time. The attack it sets off, while it's taken out.
+    const ARENA_BURN: u32 = 11954;
+    static BURN: Mutex<Option<i32>> = Mutex::new(None);
+    {
+        let mut burn = BURN.lock().unwrap_or_else(|e| e.into_inner());
+        if on != burn.is_some() {
+            if let Some(row) = (unsafe { eldenring::cs::SoloParamRepository::instance_mut() }).ok().and_then(|r| r.get_mut::<eldenring::cs::SpEffectParam>(ARENA_BURN)) {
+                match burn.take() {
+                    Some(own) => row.set_behavior_id(own),
+                    None => {
+                        *burn = Some(row.behavior_id());
+                        row.set_behavior_id(-1);
+                    }
+                }
+            }
+        }
+    }
+    let mut saved = SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    if on == saved.is_some() {
+        return on;
+    }
+    let Ok(repo) = (unsafe { eldenring::cs::SoloParamRepository::instance_mut() }) else { return saved.is_some() };
+    let write = |row: &mut eldenring::param::HIT_MTRL_PARAM_ST, e: Effects| {
+        row.set_sp_effect_id_on_hit0(e[0]);
+        row.set_sp_effect_id_on_hit1(e[1]);
+        row.set_sp_effect_id_for_wet00(e[2]);
+        row.set_sp_effect_id_for_wet01(e[3]);
+        row.set_sp_effect_id_for_wet02(e[4]);
+        row.set_sp_effect_id_for_wet03(e[5]);
+        row.set_sp_effect_id_for_wet04(e[6]);
+    };
+    if on {
+        let mut own = Vec::new();
+        for id in LAVA_MATERIALS {
+            let Some(row) = repo.get_mut::<eldenring::cs::HitMtrlParam>(id as u32) else { continue };
+            own.push((
+                id,
+                [
+                    row.sp_effect_id_on_hit0(),
+                    row.sp_effect_id_on_hit1(),
+                    row.sp_effect_id_for_wet00(),
+                    row.sp_effect_id_for_wet01(),
+                    row.sp_effect_id_for_wet02(),
+                    row.sp_effect_id_for_wet03(),
+                    row.sp_effect_id_for_wet04(),
+                ],
+            ));
+            write(row, [-1; 7]);
+        }
+        log(format!("lava: harmless for this fight ({} floor materials)", own.len()));
+        *saved = Some(own);
+    } else {
+        for (id, effects) in saved.take().unwrap_or_default() {
+            if let Some(row) = repo.get_mut::<eldenring::cs::HitMtrlParam>(id as u32) {
+                write(row, effects);
+            }
+        }
+        log("lava: burns again");
+    }
+    on
+}
+
 /// Torrent takes no damage in Mario mode. Looked up twice a second, he comes and goes.
 fn torrent_cant_die() {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -2348,12 +2417,14 @@ fn frame(data: &FD4TaskData) {
                 log(format!(
                     "hurt: {} by {} (last carried {:#x}), hp {} of {}, mario action {:#x}",
                     if from_held { "ignored, from the enemy Mario holds or threw" } else if from_lava { "ignored, the game's lava damage" } else { "taken" },
-                    attacker.map_or("?".to_string(), |id| format!("c{id:04}")),
+                    attacker.map_or("nobody".to_string(), |id| format!("c{id:04}")),
                     carry::last_mob_key(),
                     data.hp,
                     data.max_hp,
                     m.state.action
                 ));
+                let effects: Vec<i32> = player_ref.chr_ins.special_effect.entries().map(|e| e.param_id).collect();
+                log(format!("hurt: effects on him {effects:?}, floor material {}", player_ref.chr_ins.modules.physics.material_info.hit_material));
             }
             if !m.dead && data.hp > 0 {
                 set_player_hp(data.max_hp);
@@ -2448,7 +2519,7 @@ fn frame(data: &FD4TaskData) {
         let tt = std::time::Instant::now();
         let tick_span = perf::span(perf::TICK);
         // lava under the Tarnished (he stands where Mario does): SM64's lava boost
-        let lava = LAVA_MATERIALS.contains(&player_ref.chr_ins.modules.physics.material_info.hit_material);
+        let lava = !safe_lava(combat::lava_fight()) && LAVA_MATERIALS.contains(&player_ref.chr_ins.modules.physics.material_info.hit_material);
         let result = worker::call("tick", move |ctx| {
             if lava {
                 unsafe { sm64::sm64_er_lava(id) };

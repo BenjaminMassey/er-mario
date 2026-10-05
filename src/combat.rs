@@ -297,8 +297,13 @@ const SOFTER: [(u32, f32); 2] = [(3550, 0.6), (3560, 0.6)];
 
 /// Who hit the player last (character id), and what's left of his hits (1 = all of it).
 pub fn last_attacker(player: &ChrIns) -> (Option<u32>, f32) {
-    let id = unsafe { WorldChrMan::instance() }.ok().and_then(|wcm| wcm.chr_ins_by_handle(&player.last_hit_by)).map(|c| c.character_id);
-    (id, id.and_then(|id| SOFTER.iter().find(|s| s.0 == id)).map_or(1.0, |s| s.1))
+    let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return (None, 1.0) };
+    let softer = |id: u32| SOFTER.iter().find(|s| s.0 == id).map(|s| s.1);
+    let id = wcm.chr_ins_by_handle(&player.last_hit_by).map(|c| c.character_id);
+    // (the game's "last hit by" named nobody in every fight looked at: with one of them on the
+    // boss bar, it's taken to be him)
+    let scale = id.and_then(softer).or_else(|| boss_handles().iter().filter_map(|h| wcm.chr_ins_by_handle(h)).find_map(|c| softer(c.character_id)));
+    (id, scale.unwrap_or(1.0))
 }
 
 /// Characters within `range` metres of `center` (not the player, alive).
@@ -514,6 +519,16 @@ pub fn impact(combat: &mut Combat, handle: &FieldInsHandle, pct: f32, tick: u32)
     if !is_boss(handle) {
         pass_to_bar(wcm, dealt);
     }
+}
+
+/// The God-Devouring Serpent and Rykard, who stand in lava (c4710, c4711).
+const LAVA_BOSSES: [u32; 2] = [4710, 4711];
+
+/// One of the bosses who fight from a lava pool has his bar up. Mario can only hit what he
+/// stands next to, so for that fight the lava does nothing to him.
+pub fn lava_fight() -> bool {
+    let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return false };
+    boss_handles().iter().any(|h| wcm.chr_ins_by_handle(h).is_some_and(|c| LAVA_BOSSES.contains(&c.character_id)))
 }
 
 /// The bosses on screen (their boss bars).
