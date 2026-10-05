@@ -53,6 +53,7 @@ pub fn hold() {
 }
 
 pub fn reapply() {
+    let _span = crate::perf::span(crate::perf::LAKITU);
     // only this frame's (not a stale one when the Mario frame stopped, e.g. loading)
     let Some((v, at)) = *LAST.lock().unwrap_or_else(|e| e.into_inner()) else { return };
     static GAP: AtomicBool = AtomicBool::new(false);

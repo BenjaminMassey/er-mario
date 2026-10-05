@@ -343,6 +343,7 @@ pub unsafe fn install_menu_hook() {
         return;
     }
     let seen = |r: *mut ilhook::x64::Registers| {
+        let _span = crate::perf::span(crate::perf::MENU_MODEL);
         let rend = unsafe { (*r).rcx } as usize;
         let mut rends = RENDS.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
@@ -350,6 +351,7 @@ pub unsafe fn install_menu_hook() {
             e.2 = now;
         } else if rends.len() < 16 {
             rends.push((rend, now, now));
+            log(format!("menu pose: a menu model appears ({} now)", rends.len()));
         }
         HAVE_RENDS.store(true, std::sync::atomic::Ordering::Relaxed);
     };
@@ -422,15 +424,24 @@ fn find_models(now: bool) -> bool {
         HAVE_RENDS.store(!r.is_empty(), Ordering::Relaxed);
         (r.iter().map(|e| e.0).collect(), r.iter().any(|e| e.1.elapsed().as_secs_f32() < 3.0))
     };
-    // (every frame while a model is new, a few times a second for those that stay)
+    // (ten times a second while a model is new, a few times for those that stay: the walk
+    // asks Windows about a lot of memory, and that can take a quarter of a millisecond a time)
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if !now && !young && last.is_some_and(|t| t.elapsed().as_secs_f32() < 0.25) {
+        let every = if now || young { 0.1 } else { 0.25 };
+        if last.is_some_and(|t| t.elapsed().as_secs_f32() < every) {
             return ANY.load(Ordering::Relaxed);
         }
         *last = Some(std::time::Instant::now());
     }
+    if rends.is_empty() {
+        let mut known = MARIO_IMPORTERS.lock().unwrap_or_else(|e| e.into_inner());
+        known.clear();
+        ANY.store(false, Ordering::Relaxed);
+        return false;
+    }
+    let _span = crate::perf::span(crate::perf::MENU_WALK);
     let pointer = |at: usize| explore::read_u64(at).map(|p| p as usize).filter(|p| *p > 0x10000 && p % 8 == 0 && p >> 47 == 0);
     let live: Vec<usize> = {
         let mut l = LIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -486,15 +497,17 @@ fn find_models(now: bool) -> bool {
         if let Some(body) = body.filter(|b| is_live(*b)) {
             found.push(body);
         }
-        // the armour pieces keep theirs in different places (through their cloth, their
-        // location entities): any importer a piece points at, directly or one object on
+        // an armour piece's importer: the piece points at it itself, or it's on the piece's
+        // cloth instance (piece +0x130 or +0x2f0, then +0x120). Only these places are read:
+        // following every pointer a piece holds meant asking Windows about hundreds of
+        // addresses, which takes a millisecond each on some systems (0.3 s a walk, and the
+        // game makes the save picture's model every so often while playing).
         let Some(asm) = pointer(rend + 0x778) else { continue };
         for part in pointers(asm, 0x200).into_iter().filter(|p| is_piece(*p)) {
-            for inner in pointers(part, 0x3b0) {
-                if is_live(inner) {
-                    found.push(inner);
-                } else {
-                    found.extend(pointers(inner, 0x220).into_iter().filter(|p| is_live(*p)));
+            found.extend(pointers(part, 0x3b0).into_iter().filter(|p| is_live(*p)));
+            for cloth in [0x130, 0x2f0] {
+                if let Some(imp) = pointer(part + cloth).and_then(|c| pointer(c + 0x120)).filter(|p| is_live(*p)) {
+                    found.push(imp);
                 }
             }
         }

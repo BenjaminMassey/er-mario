@@ -238,6 +238,7 @@ pub fn class_name() {
         return;
     }
     *last = Some(std::time::Instant::now());
+    let _span = crate::perf::span(crate::perf::CLASS_NAME);
     // (in another language the name isn't there to find: a few tries while the text loads,
     // then it's left alone. Each try reads every loaded text)
     static TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

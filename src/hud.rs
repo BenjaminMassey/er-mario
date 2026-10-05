@@ -422,6 +422,7 @@ impl ImguiRenderLoop for Overlay {
     }
 
     fn render(&mut self, ui: &mut imgui::Ui) {
+        let _span = crate::perf::span(crate::perf::OVERLAY);
         // first launch: building Mario from the ROM (needs no textures, so it shows from the start)
         if let Some(setup) = SETUP.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let size = ui.io().display_size;

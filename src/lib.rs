@@ -24,6 +24,7 @@ mod throw_collision;
 mod names;
 mod notes;
 mod paths;
+mod perf;
 mod sm64;
 mod squish;
 mod swing;
@@ -315,6 +316,7 @@ const SOUND_HEART: i32 = 0x3064_C081;
 /// Mario's health), and nothing at all shows over the game-over screen; menus keep their own HUD
 /// states. Runs after the menu manager, before the HUD is drawn.
 fn hud_task() {
+    let _span = perf::span(perf::HUD);
     static HIDDEN: AtomicBool = AtomicBool::new(false);
     names::class_name();
     // character creation: the Vagabond's preview is Mario too
@@ -780,7 +782,10 @@ fn game_confirms_with(player: &PlayerIns, t: &havok_col::Tri, filter: u32) -> bo
 
 fn havok_surfaces(h: &mut havok_col::HavokCollision, origin: [f32; 3], mario: [f32; 3], player: &PlayerIns) -> Option<Vec<sm64::SM64Surface>> {
     let c = collision::sm_to_er(origin, mario);
-    let mut tris = h.query(glam::Vec3::new(c.0, c.1, c.2))?;
+    let mut tris = {
+        let _span = perf::span(perf::HAVOK_QUERY);
+        h.query(glam::Vec3::new(c.0, c.1, c.2))?
+    };
     let before = tris.len();
     static COMPARED: AtomicBool = AtomicBool::new(false);
     if !COMPARED.swap(true, Ordering::Relaxed) {
@@ -860,6 +865,7 @@ fn havok_surfaces(h: &mut havok_col::HavokCollision, origin: [f32; 3], mario: [f
         }
     }
     let mut centers = std::collections::HashMap::new();
+    let triangles = perf::span(perf::TRIANGLES);
     for (t, layer, body) in &tris {
         let mid = if h.is_convex(*body) || h.is_boxed(*body) || h.mesh_of(*body).is_some_and(|m| m.small_closed()) {
             *centers.entry(*body).or_insert_with(|| {
@@ -890,7 +896,11 @@ fn havok_surfaces(h: &mut havok_col::HavokCollision, origin: [f32; 3], mario: [f
             Some((lo - glam::Vec3::splat(0.5), hi + glam::Vec3::splat(0.5)))
         })
         .collect();
-    floor_patches(&mut out, origin, mario, player, &moving);
+    drop(triangles);
+    {
+        let _span = perf::span(perf::FLOOR_PATCHES);
+        floor_patches(&mut out, origin, mario, player, &moving);
+    }
     Some(out)
 }
 
@@ -1067,6 +1077,7 @@ static EZ_MARIO: AtomicBool = AtomicBool::new(false);
 
 /// Runs after the game's animation, before rendering: F11 toggle + engine Mario pose.
 fn pose_task() {
+    let _span = perf::span(perf::POSE);
     static WAS: AtomicBool = AtomicBool::new(false);
     let f11 = debug_key(0x7A);
     if f11 && !WAS.swap(true, Ordering::Relaxed) {
@@ -1085,6 +1096,7 @@ fn pose_task() {
 }
 
 fn pose_task_late() {
+    let _span = perf::span(perf::POSE_LATE);
     // no Tarnished while Mario is on his way (spawning, loading in, respawning)
     // (only when Mario mode is really on its way: not when it went off by itself, e.g. first
     // launch without the built files, no ROM, or the no-ground safety)
@@ -1174,6 +1186,7 @@ static ON_LADDER: AtomicBool = AtomicBool::new(false);
 /// detects menus (buttons pressed but nothing reaches the character) and strips every action but
 /// interact from the Tarnished, so he never rolls, attacks or jumps on Mario's buttons.
 fn input_task() {
+    let _span = perf::span(perf::INPUT);
     if !ENABLED.load(Ordering::Relaxed) {
         MENU_OPEN.store(false, Ordering::Relaxed);
         return;
@@ -1319,6 +1332,7 @@ impl Drop for DrawTimer {
 }
 
 fn frame(data: &FD4TaskData) {
+    let _span = perf::span(perf::FRAME);
     // outside Mario mode the Tarnished dies like anyone (the flag is set further down, while
     // Mario is alive)
     if !ENABLED.load(Ordering::Relaxed) {
@@ -1330,6 +1344,12 @@ fn frame(data: &FD4TaskData) {
         let mut p = PERF.lock().unwrap_or_else(|e| e.into_inner());
         p.frames += 1;
         p.time += data.delta_time.time;
+        // (always: a hitch someone reports has to be in a log made without debug mode)
+        if p.time >= 2.0 {
+            if let Some(slow) = perf::report() {
+                log(format!("perf: slow in the last 2 s: {slow}"));
+            }
+        }
         if p.time >= 2.0 && !debug() {
             *p = Perf::new();
         } else if p.time >= 2.0 {
@@ -2066,7 +2086,10 @@ fn frame(data: &FD4TaskData) {
             }
         }
         m.ticks += 1;
-        let moving_changed = m.moving.update(&mut m.havok, m.origin, m.state.position);
+        let moving_changed = {
+            let _span = perf::span(perf::MOVING);
+            m.moving.update(&mut m.havok, m.origin, m.state.position)
+        };
         if moving_changed {
             m.last_query = None;
         }
@@ -2083,6 +2106,7 @@ fn frame(data: &FD4TaskData) {
             let (mut surfaces, from_havok) = if continue_tick {
                 (Vec::new(), true)
             } else {
+                let _span = perf::span(perf::COLLISION);
                 match havok_surfaces(&mut m.havok, m.origin, m.state.position, player_ref) {
                     Some(s) => {
                         m.moving.watch_query(&m.havok);
@@ -2129,6 +2153,7 @@ fn frame(data: &FD4TaskData) {
                         surfaces.extend(flat_floor(feet));
                     }
                 }
+                let _span = perf::span(perf::SURFACES);
                 load_surfaces(&surfaces);
                 m.surfaces = surfaces;
             }
@@ -2136,7 +2161,10 @@ fn frame(data: &FD4TaskData) {
         let id = m.id;
         // characters Mario could hit this tick, and whether the Tarnished just got hurt
         let here = to_er(m.origin, m.state.position);
-        let targets = combat::nearby(&here, 8.0, m.origin);
+        let targets = {
+            let _span = perf::span(perf::TARGETS);
+            combat::nearby(&here, 8.0, m.origin)
+        };
         let no_stomp = m.combat.stomp_limits(&targets, m.state.action & 0x800 == 0);
         // breakable props (crates, jars, clutter, many tiny or invisible) never bounce Mario like a
         // stomped enemy when he drops onto them (he bounced off "nothing"); ground pounds still break them
@@ -2271,6 +2299,7 @@ fn frame(data: &FD4TaskData) {
         }
         let stuck_at = m.state.position;
         let tt = std::time::Instant::now();
+        let tick_span = perf::span(perf::TICK);
         // lava under the Tarnished (he stands where Mario does): SM64's lava boost
         let lava = player_ref.chr_ins.modules.physics.material_info.hit_material == LAVA_MATERIAL;
         let result = worker::call("tick", move |ctx| {
@@ -2361,6 +2390,7 @@ fn frame(data: &FD4TaskData) {
             let hits = if alive { combat::hits(id, &state, &target_pos, &no_stomp) } else { Vec::new() };
             (state, ctx.geo.position[..n].to_vec(), ctx.geo.color[..n].to_vec(), ctx.geo.normal[..n].to_vec(), parts, hits)
         });
+        drop(tick_span);
         PERF.lock().unwrap_or_else(|e| e.into_inner()).tick_ms += tt.elapsed().as_secs_f32() * 1000.0;
         match result {
             Some((state, mesh, colors, normals, parts, hits)) => {
