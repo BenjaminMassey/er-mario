@@ -2326,7 +2326,8 @@ fn frame(data: &FD4TaskData) {
             // everyone else still can (carry.rs / swing.rs tell them apart by who's near)
             let pos = player_ref.chr_ins.modules.physics.position;
             let here = glam::Vec3::new(pos.0, pos.1, pos.2);
-            let damaged = m.combat.took_damage(data.hp, data.max_hp);
+            let (attacker, scale) = combat::last_attacker(&player_ref.chr_ins);
+            let damaged = m.combat.took_damage(data.hp, data.max_hp, scale);
             let was_damaged = damaged.is_some();
             let from_held = was_damaged && (carry::harmless(here) || swing::harmless(here));
             // the game's own lava damage: Mario already pays for lava with SM64's lava boost
@@ -2341,8 +2342,9 @@ fn frame(data: &FD4TaskData) {
             let hurt = damaged.filter(|_| !m.dead && !from_held && !from_lava);
             if debug() && was_damaged {
                 log(format!(
-                    "hurt: {} (last carried {:#x}), hp {} of {}, mario action {:#x}",
+                    "hurt: {} by {} (last carried {:#x}), hp {} of {}, mario action {:#x}",
                     if from_held { "ignored, from the enemy Mario holds or threw" } else if from_lava { "ignored, the game's lava damage" } else { "taken" },
+                    attacker.map_or("?".to_string(), |id| format!("c{id:04}")),
                     carry::last_mob_key(),
                     data.hp,
                     data.max_hp,
@@ -2670,7 +2672,7 @@ fn frame(data: &FD4TaskData) {
         // doesn't run while the game drives, so it's done here: wedges off, his HP back to full.
         if riding && !m.dead {
             let (hp, max) = (player_ref.chr_ins.modules.data.hp, player_ref.chr_ins.modules.data.max_hp);
-            let wedges = match m.combat.took_damage(hp, max) {
+            let wedges = match m.combat.took_damage(hp, max, combat::last_attacker(&player_ref.chr_ins).1) {
                 Some(combat::Hurt::Hit(n)) => n as i32,
                 Some(combat::Hurt::Drain) => 1,
                 None => 0,

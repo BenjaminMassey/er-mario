@@ -290,6 +290,16 @@ pub fn in_the_way(at: glam::Vec3, reach: f32) -> Vec<(FieldInsHandle, u64, bool)
     out
 }
 
+/// Enemies whose hits count for less against Mario: character id (cXXXX) and how much of the
+/// hit is left. The Godskin Noble (c3550, the fat one with the rapier) took three wedges a hit.
+const SOFTER: [(u32, f32); 1] = [(3550, 0.6)];
+
+/// Who hit the player last (character id), and what's left of his hits (1 = all of it).
+pub fn last_attacker(player: &ChrIns) -> (Option<u32>, f32) {
+    let id = unsafe { WorldChrMan::instance() }.ok().and_then(|wcm| wcm.chr_ins_by_handle(&player.last_hit_by)).map(|c| c.character_id);
+    (id, id.and_then(|id| SOFTER.iter().find(|s| s.0 == id)).map_or(1.0, |s| s.1))
+}
+
 /// Characters within `range` metres of `center` (not the player, alive).
 pub fn nearby(center: &HavokPosition, range: f32, origin: [f32; 3]) -> Vec<Target> {
     let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return Vec::new() };
@@ -745,13 +755,13 @@ impl Combat {
     /// Game thread: how the Tarnished's HP loss since the last check turns into Mario's health
     /// (his HP is refilled right after, so SM64's power meter is what counts): a real hit costs
     /// wedges by its size with SM64's knockback, poison / bleed / rot ticks drain a wedge per 10%.
-    pub fn took_damage(&mut self, hp: i32, max: i32) -> Option<Hurt> {
+    pub fn took_damage(&mut self, hp: i32, max: i32, scale: f32) -> Option<Hurt> {
         let lost = self.last_hp.map(|old| old - hp).unwrap_or(0);
         self.last_hp = Some(max);
         if lost <= 0 {
             return None;
         }
-        let frac = lost as f32 / max.max(1) as f32;
+        let frac = lost as f32 / max.max(1) as f32 * scale;
         if frac >= 0.04 {
             return Some(Hurt::Hit(if frac < 0.25 { 1 } else if frac < 0.5 { 2 } else { 3 }));
         }
