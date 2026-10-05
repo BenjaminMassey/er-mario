@@ -16,13 +16,9 @@ const NOTES: &str = concat!(
     "ER Mario ",
     env!("CARGO_PKG_VERSION"),
     " Patch notes:\n\n",
-    "* Mario in character creation: on the class card, as the preview, and in your save picture.\n",
-    "* Some balancing tweaks, bosses are harder to stagger, it now depends on their poise.\n",
-    "* Enemies get squished when you land on them. (SO satisfying)\n",
-    "* Red NPC invaders can be hit now.\n",
-    "* Dialogue subtitles show up and can be skipped.\n",
-    "* Works on Mac through CrossOver.\n",
-    "* No more sliding on tiny bumps, and rocks stay solid when you jump next to them."
+    "* Mario is immune to poison, scarlet rot, bleed, frostbite, madness and deathblight.\n",
+    "* Punches and kicks do 20% more damage to bosses, dives 10% more.\n",
+    "* Fixed small hitches when playing in a language other than English."
 );
 
 /// Which version's notes were shown last.
