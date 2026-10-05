@@ -57,7 +57,7 @@ pub fn update(combat: &mut Combat, tick: u32, dt: f32, charge: Option<(Vec3, Vec
             recent.insert(key, Instant::now());
             combat::impact(combat, &handle, if strong { HIT_STRONG } else { HIT }, tick);
             crate::worker::call("trample sound", |_| unsafe { crate::sm64::sm64_play_sound_global(SOUND_BUMP) });
-            log(format!("trample: ran into {} at {:.1} m/s", if strong { "a strong enemy" } else { "an enemy" }, vel.length()));
+            log(format!("trample: ran into {} at {:.1} m/s", if strong { "a big or strong enemy" } else { "an enemy" }, vel.length()));
             if !strong {
                 flung.push(Flung { handle, vel: vel * CARRY + Vec3::Y * LIFT, since: Instant::now(), limp: false });
             }

@@ -2689,9 +2689,12 @@ fn frame(data: &FD4TaskData) {
                 set_player_hp(max);
             }
         }
-        if was_riding && !riding {
+        // Yoshi's sprint runs on the Tarnished's stamina, and at twice the pace it's gone twice
+        // as fast: out of it he dropped out of the sprint and stood there until asked again.
+        if riding {
             if let Some(p) = (unsafe { WorldChrMan::instance_mut() }).ok().and_then(|w| w.main_player.as_mut()) {
-                p.chr_ins.debug_flags.set_disabled_hit(false);
+                let d = &mut p.chr_ins.modules.data;
+                d.stamina = d.max_stamina;
             }
         }
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());

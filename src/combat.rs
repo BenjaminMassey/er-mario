@@ -259,6 +259,10 @@ pub fn is_torrent(chr: &ChrIns) -> bool {
     handle_key(&gdm.main_player_game_data.mount_handle) == handle_key(&chr.field_ins_handle)
 }
 
+/// A body wider or taller than this (m) is a big enemy: a man is about 0.4 by 1.8
+const BIG_WIDTH: f32 = 0.9;
+const BIG_HEIGHT: f32 = 2.8;
+
 /// Enemies within `reach` of a point, their own width added: handle, key, and whether it's a
 /// boss or one of the strong ones.
 pub fn in_the_way(at: glam::Vec3, reach: f32) -> Vec<(FieldInsHandle, u64, bool)> {
@@ -276,8 +280,11 @@ pub fn in_the_way(at: glam::Vec3, reach: f32) -> Vec<(FieldInsHandle, u64, bool)
             if dx * dx + dz * dz > (reach + width).powi(2) || !(-3.0..2.0).contains(&dy) || is_torrent(chr) {
                 continue;
             }
+            // (trolls, dragons and the like count with the bosses: by the size of their body)
+            let height = ph.hit_height.max(ph.chr_hit_height);
+            let big = width > BIG_WIDTH || height > BIG_HEIGHT;
             let handle = chr.field_ins_handle;
-            out.push((handle, handle_key(&handle), is_boss(&handle) || chr.team_type == TEAM_STRONG_ENEMY));
+            out.push((handle, handle_key(&handle), big || is_boss(&handle) || chr.team_type == TEAM_STRONG_ENEMY));
         }
     }
     out
