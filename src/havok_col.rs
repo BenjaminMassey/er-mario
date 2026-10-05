@@ -92,15 +92,41 @@ impl Mesh {
     }
 }
 
+/// Hashing for maps keyed by an address or a body index: one multiplication. The standard
+/// hasher is made to withstand hostile keys, and the query looks tens of thousands of bodies
+/// up in these maps several times a second.
+#[derive(Default)]
+pub struct Plain(u64);
+
+impl std::hash::Hasher for Plain {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (n as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(26);
+    }
+    fn write_u32(&mut self, n: u32) {
+        self.write_usize(n as usize);
+    }
+}
+
+type PlainMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Plain>>;
+pub type PlainSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<Plain>>;
+
 #[derive(Default)]
 pub struct HavokCollision {
     /// shape address -> (mesh data address, primitive count, decoded mesh)
-    meshes: HashMap<usize, (usize, u32, Option<Arc<Mesh>>)>,
+    meshes: PlainMap<usize, (usize, u32, Option<Arc<Mesh>>)>,
     /// convex shapes (boxes, hulls, cylinders): shape address -> (vtable, decoded hull)
-    convex: HashMap<usize, (usize, Option<Arc<Mesh>>)>,
+    convex: PlainMap<usize, (usize, Option<Arc<Mesh>>)>,
     pub layers: Vec<u32>,
     /// bodies handled elsewhere (moving platforms become SM64 surface objects)
-    pub exclude: std::collections::HashSet<u32>,
+    pub exclude: PlainSet<u32>,
     /// bodies that contributed triangles to the last query
     pub last_bodies: std::collections::HashSet<u32>,
     bodies: usize,
@@ -108,7 +134,7 @@ pub struct HavokCollision {
     logged_layers: bool,
     /// shapes collided as a box (custom-piece meshes): the game's rays pass their gaps, so they
     /// can't confirm them
-    pub boxed: std::collections::HashSet<usize>,
+    pub boxed: PlainSet<usize>,
     /// bodies skipped for not being in the physics world (diagnostics)
     pub not_in_world: u32,
     queries: u32,
@@ -770,19 +796,26 @@ impl HavokCollision {
         let (mut n_layer_ok, mut n_decoded, mut n_near, mut n_picked) = (0u32, 0u32, 0u32, 0usize);
         let mut out = Vec::new();
         let mut seen_layers: HashMap<u32, u32> = HashMap::new();
+        // (this loop goes over every body in the world, tens of thousands, for the hundred or so
+        // near Mario: the cheap tests come first, and a body's rotation is only worked out
+        // once it's known to be near)
+        let count_layers = !self.logged_layers;
+        let rotation = |body: usize| {
+            body_rotation(body)
+                .unwrap_or_else(|| Quat::from_xyzw(f32_at(body + 0x80), f32_at(body + 0x84), f32_at(body + 0x88), f32_at(body + 0x8c)).conjugate())
+        };
         for i in 0..count {
             let body = bodies + i * 0xb0;
             let shape = unsafe { *((body + 0x60) as *const usize) };
-            if shape == 0 || self.exclude.contains(&(i as u32)) {
+            if shape == 0 {
                 continue;
             }
             let layer = u32_at(body + 0x6c);
-            let t = vec3_at(body + 0x30);
-            let q = body_rotation(body)
-                .unwrap_or_else(|| Quat::from_xyzw(f32_at(body + 0x80), f32_at(body + 0x84), f32_at(body + 0x88), f32_at(body + 0x8c)).conjugate());
             // skip layers we don't want before touching the shape
             if !self.layers.is_empty() && !self.layers.contains(&(layer & 0xff)) {
-                *seen_layers.entry(layer).or_default() += 1;
+                if count_layers {
+                    *seen_layers.entry(layer).or_default() += 1;
+                }
                 continue;
             }
             // taken out of the physics world (+0x78 broadphase id -1): an opened door's blocker,
@@ -791,10 +824,10 @@ impl HavokCollision {
                 self.not_in_world += 1;
                 continue;
             }
-            if !q.is_finite() || q.length_squared() < 0.5 {
+            if self.exclude.contains(&(i as u32)) {
                 continue;
             }
-            let q = q.normalize();
+            let t = vec3_at(body + 0x30);
             n_layer_ok += 1;
             // shapes get freed and re-allocated as the world streams: validate the cache entry
             // unknown shapes (and stale pointers in unused body slots) get one real memory check,
@@ -854,8 +887,8 @@ impl HavokCollision {
                                     let lo = v.clone().fold(Vec3::splat(f32::MAX), |a, c| a.min(*c));
                                     let hi = v.fold(Vec3::splat(f32::MIN), |a, c| a.max(*c));
                                     crate::dlog(format!(
-                                        "  body {i} at {t:.2?} rot {q:.3?} flags {:#x} bp {:#x}: local box {lo:.2?}..{hi:.2?} (centre {:.2?})",
-                                        u32_at(body + 0x68), u32_at(body + 0x78), (lo + hi) / 2.0
+                                        "  body {i} at {t:.2?} rot {:.3?} flags {:#x} bp {:#x}: local box {lo:.2?}..{hi:.2?} (centre {:.2?})",
+                                        rotation(body), u32_at(body + 0x68), u32_at(body + 0x78), (lo + hi) / 2.0
                                     ));
                                 }
                             }
@@ -884,7 +917,14 @@ impl HavokCollision {
             if (t - center).length() > mesh.radius + RADIUS + BELOW {
                 continue;
             }
-            *seen_layers.entry(layer).or_default() += 1;
+            let q = rotation(body);
+            if !q.is_finite() || q.length_squared() < 0.5 {
+                continue;
+            }
+            let q = q.normalize();
+            if count_layers {
+                *seen_layers.entry(layer).or_default() += 1;
+            }
             // query boxes (world AABBs): the main box around Mario and a narrow deep column under him
             let boxes = [
                 (center - Vec3::new(RADIUS, BOX_DOWN, RADIUS), center + Vec3::new(RADIUS, ABOVE, RADIUS)),
