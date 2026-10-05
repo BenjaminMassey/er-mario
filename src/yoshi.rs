@@ -26,8 +26,17 @@ const UNIT: f32 = 0.01 * 0.25;
 const SIZE: f32 = 1.1;
 /// Torrent's saddle is where his back was at 1.6 times: Mario comes down by the difference.
 pub const SEAT_DROP: f32 = 0.85 * (1.6 - SIZE);
+/// How much faster than Torrent he goes
+const RIDE_SPEED: f32 = 2.0;
+/// SOUND_GENERAL_YOSHI_WALK
+const SOUND_YOSHI_WALK: i32 = 0x306E_2081;
+/// SOUND_GENERAL_YOSHI_TALK
+const SOUND_YOSHI_TALK: i32 = 0x3070_3081;
+/// Torrent's jump and his second one in the air
+const JUMPS: [i32; 2] = [6130, 6131];
 const IDLE: usize = 0;
 const WALK: usize = 1;
+const JUMP: usize = 2;
 /// The walk cycle's own pace (m/s at SIZE 1): faster rides play it faster.
 const WALK_SPEED: f32 = 1.2;
 
@@ -223,8 +232,13 @@ impl Yoshi {
     fn pose(&self, anim: usize, at: f32) -> [(Vec3, Quat); 17] {
         let a = &self.anims[anim.min(self.anims.len() - 1)];
         let n = a.frames as usize;
-        let (f0, t) = (at.floor() as usize % n, at.fract());
-        let (p0, p1) = (self.frame(a, f0), self.frame(a, (f0 + 1) % n));
+        // (the jump is played once and held)
+        let (f0, f1, t) = if anim == JUMP {
+            (at.floor() as usize, at.floor() as usize + 1, at.fract())
+        } else {
+            (at.floor() as usize % n, (at.floor() as usize + 1) % n, at.fract())
+        };
+        let (p0, p1) = (self.frame(a, f0.min(n - 1)), self.frame(a, f1.min(n - 1)));
         let mut out = [(Vec3::ZERO, Quat::IDENTITY); 17];
         for (k, p) in self.parts.iter().enumerate() {
             let Some(slot) = p.slot else { continue };
@@ -247,6 +261,7 @@ impl Yoshi {
 
 struct State {
     chr: usize,
+    handle: eldenring::cs::FieldInsHandle,
     pose: [(Vec3, Quat); 17],
     anim: usize,
     at: f32,
@@ -254,9 +269,50 @@ struct State {
     pos: Vec3,
     /// skeleton and BONES' indices in it
     bones: Option<(usize, [usize; 22])>,
+    /// Torrent's own animation
+    theirs: i32,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+/// What he costs (debug): runs, time in all and the slowest run (ns) of tick [0] and apply [1].
+static COST: [[std::sync::atomic::AtomicU64; 3]; 2] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; 2];
+
+struct Timed(usize, Instant);
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let ns = self.1.elapsed().as_nanos() as u64;
+        COST[self.0][0].fetch_add(1, Relaxed);
+        COST[self.0][1].fetch_add(ns, Relaxed);
+        COST[self.0][2].fetch_max(ns, Relaxed);
+    }
+}
+
+fn report_cost() {
+    use std::sync::atomic::Ordering::Relaxed;
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let since = last.map_or(0.0, |t| t.elapsed().as_secs_f32());
+    if last.is_some() && since < 2.0 {
+        return;
+    }
+    *last = Some(Instant::now());
+    let read = |i: usize| [0, 1, 2].map(|k| COST[i][k].swap(0, Relaxed) as f32);
+    let (tick, pose) = (read(0), read(1));
+    if tick[0] > 0.0 && since > 0.0 {
+        log(format!(
+            "yoshi: cost per frame {:.3} ms (finding him {:.3} ms, slowest {:.2}; posing {:.3} ms in {:.1} writes, slowest {:.2})",
+            (tick[1] + pose[1]) / tick[0] / 1e6,
+            tick[1] / tick[0] / 1e6,
+            tick[2] / 1e6,
+            pose[1] / tick[0] / 1e6,
+            pose[0] / tick[0],
+            pose[2] / 1e6
+        ));
+    }
+}
 
 fn c_str(p: usize) -> String {
     let mut s = Vec::new();
@@ -286,25 +342,60 @@ fn map_bones(skeleton: usize) -> Option<[usize; 22]> {
     Some(out)
 }
 
+static CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mario whistles for him: his voice is what's heard (played from the frame task, the input
+/// task shouldn't wait for the SM64 thread).
+pub fn call() {
+    CALLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Once a frame: finds Torrent and moves the animation on (idle standing, the walk cycle at the
 /// pace he's going).
 pub fn tick() {
     let Some(Some(yoshi)) = YOSHI.get() else { return };
+    if crate::debug() {
+        report_cost();
+    }
+    let _timed = Timed(0, Instant::now());
+    if CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        crate::worker::call("yoshi voice", |_| unsafe { crate::sm64::sm64_play_sound_global(SOUND_YOSHI_TALK) });
+    }
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let torrent = (unsafe { WorldChrMan::instance_mut() }).ok().and_then(|wcm| {
         let found: Option<&mut ChrIns> =
             wcm.summon_buddy_chr_set.characters().chain(wcm.chr_sets.iter().flatten().flat_map(|set| set.characters())).find(|c| combat::is_torrent(c));
-        found.map(|c| (c as *mut ChrIns as usize, c.modules.physics.position))
+        // ridden he's quicker than Torrent: his animations play faster, and cover more ground
+        // with it (not while Mario gets on or off, those are played in step with the rider's)
+        let mounted = wcm.main_player.as_ref().is_some_and(|p| p.chr_ins.modules.ride.is_mounted);
+        found.map(|c| {
+            // (and not in the air: a jump at that speed is over before it has begun)
+            let t = &c.modules.time_act;
+            let theirs = t.anim_queue[(t.read_idx % 10) as usize].anim_id;
+            let airborne = !c.modules.physics.touching_solid_ground || JUMPS.contains(&theirs);
+            c.modules.behavior.animation_speed = if mounted && !airborne { RIDE_SPEED } else { 1.0 };
+            // no hooves or rattling tack on Yoshi: the game's switch for a character's sounds
+            // (it turns them on by distance) and the mimic veil's, which mutes steps
+            c.chr_flags1ca.set_sounds_active(false);
+            c.chr_flags1c7.set_mimicry_enabled(true);
+            if crate::debug() {
+                static LAST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+                if LAST.swap(theirs, std::sync::atomic::Ordering::Relaxed) != theirs {
+                    log(format!("yoshi: Torrent anim -> {theirs} (airborne {airborne})"));
+                }
+            }
+            (c as *mut ChrIns as usize, c.field_ins_handle.clone(), c.modules.physics.position, airborne, theirs)
+        })
     });
-    let Some((chr, p)) = torrent else {
+    let Some((chr, handle, p, airborne, theirs)) = torrent else {
         *state = None;
         return;
     };
     let pos = Vec3::new(p.0, p.1, p.2);
     let now = Instant::now();
-    let s = state.get_or_insert_with(|| State { chr, pose: yoshi.pose(IDLE, 0.0), anim: IDLE, at: 0.0, last: now, pos, bones: None });
+    let s = state.get_or_insert_with(|| State { chr, handle: handle.clone(), pose: yoshi.pose(IDLE, 0.0), anim: IDLE, at: 0.0, last: now, pos, bones: None, theirs });
     if s.chr != chr {
-        (s.chr, s.bones, s.pos) = (chr, None, pos);
+        (s.chr, s.handle, s.bones, s.pos) = (chr, handle, None, pos);
     }
     let dt = now.duration_since(s.last).as_secs_f32().min(0.1);
     s.last = now;
@@ -312,21 +403,46 @@ pub fn tick() {
     s.pos = pos;
     // (a jump of the world's origin isn't a gallop)
     let speed = if dt > 0.0 && moved < 5.0 { moved / dt } else { 0.0 };
-    let anim = if speed > 0.5 { WALK } else { IDLE };
-    if anim != s.anim {
+    let anim = if airborne && yoshi.anims.len() > JUMP {
+        JUMP
+    } else if speed > 0.5 {
+        WALK
+    } else {
+        IDLE
+    };
+    // (from the start again for the second jump in the air)
+    let jumped = theirs != s.theirs && JUMPS.contains(&theirs);
+    s.theirs = theirs;
+    if anim != s.anim || jumped {
         (s.anim, s.at) = (anim, 0.0);
     }
     let rate = if anim == WALK { (speed / (WALK_SPEED * SIZE)).clamp(0.5, 4.0) } else { 1.0 };
+    let before = s.at;
     s.at += dt * 30.0 * rate;
+    // his steps, on the two frames of the walk SM64 plays them on
+    if anim == WALK && [0.0, 15.0].iter().any(|f| ((before - f) / 30.0).floor() != ((s.at - f) / 30.0).floor()) {
+        crate::worker::call("yoshi step", |_| unsafe { crate::sm64::sm64_play_sound_global(SOUND_YOSHI_WALK) });
+    }
     s.pose = yoshi.pose(anim, s.at);
 }
 
 /// Puts his pose on Torrent's bones (after the game's animation, in every pose task).
 pub fn apply() {
+    let _timed = Timed(1, Instant::now());
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(s) = state.as_mut() else { return };
-    // (only a Torrent seen this frame: the pointer isn't checked again here)
     if s.last.elapsed().as_secs_f32() > 0.1 {
+        return;
+    }
+    // Asked from the game again every time: he can be taken out of the world between the frame
+    // task that found him and this one (riding fast through loading areas), and a write to his
+    // old pose buffers then lands in freed memory.
+    let Ok(wcm) = (unsafe { WorldChrMan::instance_mut() }) else { return };
+    let live = match wcm.summon_buddy_chr_set.chr_ins_by_handle_mut(&s.handle) {
+        Some(c) => Some(c as *mut ChrIns as usize),
+        None => wcm.chr_ins_by_handle_mut(&s.handle).map(|c| c as *mut ChrIns as usize),
+    };
+    if live != Some(s.chr) {
         return;
     }
     let raw = |a: usize| unsafe { *(a as *const usize) };

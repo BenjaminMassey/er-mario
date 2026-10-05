@@ -1348,6 +1348,9 @@ fn input_task() {
         if rb && !HELD.swap(rb, Ordering::Relaxed) && !busy && equip::select_whistle() {
             log("input: whistle (use item) requested");
             FRAMES.store(8, Ordering::Relaxed);
+            if !mounted {
+                yoshi::call();
+            }
         } else if !rb {
             HELD.store(false, Ordering::Relaxed);
         }
@@ -2230,7 +2233,13 @@ fn frame(data: &FD4TaskData) {
             // real collision only needs refreshing when Mario has moved a bit (or every 0.5 s)
             let p = glam::Vec3::from(m.state.position);
             let stale = m.last_query.is_none_or(|(q, tick)| p.distance(q) > 75.0 || m.ticks - tick >= 15);
-            if !stale && m.last_query_havok {
+            // on Torrent the game moves him and SM64's collision isn't used: no reading it at
+            // riding speed, where it went stale every few frames (and straight away once he's off)
+            let riding = RIDING.load(Ordering::Relaxed);
+            if riding {
+                m.last_query = None;
+            }
+            if riding || (!stale && m.last_query_havok) {
                 continue_tick = true;
             }
             let (mut surfaces, from_havok) = if continue_tick {
@@ -2578,8 +2587,13 @@ fn frame(data: &FD4TaskData) {
         set_mario_position(m.id, [0.0, 0.0, 0.0]);
         m.state.position = [0.0, 0.0, 0.0];
         let caster = collision::Caster { filter: m.filter, origin: m.origin, player: player_ref };
-        let surfaces = havok_surfaces(&mut m.havok, m.origin, [0.0, 0.0, 0.0], player_ref)
-            .unwrap_or_else(|| collision::build(&caster, [0.0, 0.0, 0.0]));
+        // (on Torrent this comes round every couple of seconds, and all SM64 needs under a
+        // sitting Mario is some floor: the real one is read again when he's off)
+        let surfaces = if RIDING.load(Ordering::Relaxed) {
+            flat_floor([0.0, 0.0, 0.0]).into_iter().collect()
+        } else {
+            havok_surfaces(&mut m.havok, m.origin, [0.0, 0.0, 0.0], player_ref).unwrap_or_else(|| collision::build(&caster, [0.0, 0.0, 0.0]))
+        };
         if !surfaces.is_empty() {
             load_surfaces(&surfaces);
             m.surfaces = surfaces;
@@ -2621,6 +2635,11 @@ fn frame(data: &FD4TaskData) {
         let riding = player_ref.chr_ins.modules.ride.is_mounted || mount_anim(cur);
         torrent_cant_die();
         yoshi::tick();
+        // the whistle itself isn't heard: Yoshi answers in its place (yoshi::call)
+        if matches!(cur, 50190 | 50191) {
+            let chr = &player_ref.chr_ins as *const eldenring::cs::ChrIns as *mut eldenring::cs::ChrIns;
+            unsafe { (*chr).chr_flags1ca.set_sounds_active(false) };
+        }
         {
             static GIVEN: AtomicBool = AtomicBool::new(false);
             if !GIVEN.swap(true, Ordering::Relaxed) {
