@@ -33,6 +33,7 @@ mod update;
 mod version;
 mod voice;
 mod worker;
+mod yoshi;
 
 use std::f32::consts::PI;
 use std::fs::OpenOptions;
@@ -1110,6 +1111,7 @@ fn pose_task() {
     squish::apply();
     let Some(player) = (unsafe { WorldChrMan::instance() }).ok().and_then(|w| w.main_player.as_ref()) else { return };
     engine_mario::apply(&player.chr_ins as *const _ as usize);
+    yoshi::apply();
 }
 
 fn pose_task_late() {
@@ -1154,6 +1156,7 @@ fn pose_task_late() {
     squish::apply();
     let Some(player) = (unsafe { WorldChrMan::instance() }).ok().and_then(|w| w.main_player.as_ref()) else { return };
     engine_mario::apply(&player.chr_ins as *const _ as usize);
+    yoshi::apply();
 }
 
 /// A cutscene is playing: the player isn't rendered (pose_task_late).
@@ -2607,6 +2610,7 @@ fn frame(data: &FD4TaskData) {
         // (no asking for the mount either: loading in already riding, the module doesn't have it)
         let riding = player_ref.chr_ins.modules.ride.is_mounted || mount_anim(cur);
         torrent_cant_die();
+        yoshi::tick();
         {
             static GIVEN: AtomicBool = AtomicBool::new(false);
             if !GIVEN.swap(true, Ordering::Relaxed) {
@@ -3181,6 +3185,7 @@ pub unsafe extern "C" fn DllMain(hmodule: usize, reason: u32) -> bool {
         unsafe { engine_mario::install_menu_hook() };
         equip::init();
         lakitu::load_setting();
+        yoshi::init();
         std::thread::spawn(startup);
         cs_task.run_recurring(
             |d: &FD4TaskData| {
