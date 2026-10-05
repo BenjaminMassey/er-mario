@@ -1206,6 +1206,8 @@ static FOLLOWING: AtomicBool = AtomicBool::new(false);
 /// Mario is on Torrent (or getting on): the game rides, like it walks him through a door, and
 /// the buttons a rider needs reach it.
 static RIDING: AtomicBool = AtomicBool::new(false);
+/// Yoshi is being ridden with the keyboard (Elden Ring's own camera shows then).
+static KEY_RIDE: AtomicBool = AtomicBool::new(false);
 /// Mario is whistling for Torrent: the game gets its "use item" button pressed.
 static WHISTLING: AtomicBool = AtomicBool::new(false);
 /// Riding with Lakitu's camera: the angle (f32 bits) the left stick is turned by, NaN otherwise.
@@ -1624,12 +1626,24 @@ fn frame(data: &FD4TaskData) {
     } else {
         pad
     };
-    // Mario's keys (WASD etc.) only reach the game in menus or with Mario off
+    // On Yoshi with the keyboard: whichever of the two last steered him. The keys go by the
+    // game's own camera (a stick can be turned to Lakitu's, keys can't), so that camera shows.
+    let riding = RIDING.load(Ordering::Relaxed);
+    if !riding {
+        KEY_RIDE.store(false, Ordering::Relaxed);
+    } else if kbd::read().is_some_and(|k| k.stick_x != 0.0 || k.stick_y != 0.0) {
+        KEY_RIDE.store(true, Ordering::Relaxed);
+    } else if cam_pad.is_some_and(|p| (p.Gamepad.sThumbLX as i32).abs() > 12000 || (p.Gamepad.sThumbLY as i32).abs() > 12000) {
+        KEY_RIDE.store(false, Ordering::Relaxed);
+    }
+    // Mario's keys (WASD etc.) only reach the game in menus or with Mario off, and on ladders
+    // and on Yoshi, where the game moves him (hidden there, Yoshi could only be made to sprint)
     kbd::CAPTURE.store(
         ENABLED.load(Ordering::Relaxed)
             && IN_WORLD.load(Ordering::Relaxed)
             && (!MENU_OPEN.load(Ordering::Relaxed) || MENU_WALK.load(Ordering::Relaxed))
-            && !ON_LADDER.load(Ordering::Relaxed),
+            && !ON_LADDER.load(Ordering::Relaxed)
+            && !riding,
         Ordering::Relaxed,
     );
 
@@ -1983,7 +1997,7 @@ fn frame(data: &FD4TaskData) {
             if lakitu::ON.load(Ordering::Relaxed) {
                 lakitu::hold();
             }
-        } else if lakitu::ON.load(Ordering::Relaxed) && !m.dead && (!FOLLOWING.load(Ordering::Relaxed) || RIDING.load(Ordering::Relaxed)) {
+        } else if lakitu::ON.load(Ordering::Relaxed) && !m.dead && (!FOLLOWING.load(Ordering::Relaxed) || (RIDING.load(Ordering::Relaxed) && !KEY_RIDE.load(Ordering::Relaxed))) {
             // (a popup pausing the game freezes the camera's controls too)
             let frozen = WORLD_PAUSED.load(Ordering::Relaxed);
             let key = |vk: i32| !frozen && kbd::focused() && unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000 != 0;
