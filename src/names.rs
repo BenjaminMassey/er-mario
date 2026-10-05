@@ -238,7 +238,10 @@ pub fn class_name() {
         return;
     }
     *last = Some(std::time::Instant::now());
-    if !override_text("Vagabond", "Mario").is_empty() {
+    // (in another language the name isn't there to find: a few tries while the text loads,
+    // then it's left alone. Each try reads every loaded text)
+    static TRIES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if !override_text("Vagabond", "Mario").is_empty() || TRIES.fetch_add(1, Ordering::Relaxed) >= 15 {
         DONE.store(true, Ordering::Relaxed);
     }
 }
