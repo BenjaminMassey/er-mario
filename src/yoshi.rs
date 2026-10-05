@@ -12,7 +12,7 @@ use glam::{Mat3, Quat, Vec3};
 use crate::{combat, explore, log};
 
 /// Horse bones of his mesh parts, in geo layout order (same list as the model builder).
-const BONES: [&str; 17] = [
+pub const BONES: [&str; 17] = [
     "Pelvis", "Spine2", "Head", "Jaw", "L_UpperArm", "L_Forearm", "L_Hand", "R_UpperArm", "R_Forearm", "R_Hand", "L_Thigh", "L_Calf",
     "L_Foot", "Tail", "R_Thigh", "R_Calf", "R_Foot",
 ];
@@ -21,11 +21,11 @@ const BONES: [&str; 17] = [
 const BETWEEN: [&str; 5] = ["L_Clavicle", "R_Clavicle", "Neck", "Neck1", "Neck2"];
 const TORSO: usize = 1;
 /// SM64 units -> metres, times the 0.25 scale node of his geo layout
-const UNIT: f32 = 0.01 * 0.25;
+pub const UNIT: f32 = 0.01 * 0.25;
 /// On top of that: about his size next to Mario in SM64 (the bones carry it as their scale)
 const SIZE: f32 = 1.1;
 /// Torrent's saddle is where his back was at 1.6 times: Mario comes down by the difference.
-pub const SEAT_DROP: f32 = 0.85 * (1.6 - SIZE);
+const SEAT_DROP: f32 = 0.85 * (1.6 - SIZE);
 /// How much faster than Torrent he goes
 const RIDE_SPEED: f32 = 2.0;
 /// SOUND_GENERAL_YOSHI_WALK
@@ -42,11 +42,13 @@ const JUMP: usize = 2;
 /// The walk cycle's own pace (m/s at SIZE 1): faster rides play it faster.
 const WALK_SPEED: f32 = 1.2;
 
-struct Part {
+pub struct Part {
     parent: Option<usize>,
     offset: Vec3,
     /// which of BONES carries its mesh
-    slot: Option<usize>,
+    pub slot: Option<usize>,
+    /// its display lists (offsets in the segment)
+    pub lists: Vec<usize>,
 }
 
 struct Anim {
@@ -55,17 +57,18 @@ struct Anim {
     index: usize,
 }
 
-struct Yoshi {
-    seg: Vec<u8>,
-    parts: Vec<Part>,
+pub struct Yoshi {
+    /// the unpacked block of the ROM with his meshes, textures and animations (segment 5)
+    pub seg: Vec<u8>,
+    pub parts: Vec<Part>,
     anims: Vec<Anim>,
 }
 
-fn be16(d: &[u8], o: usize) -> Option<i16> {
+pub fn be16(d: &[u8], o: usize) -> Option<i16> {
     Some(i16::from_be_bytes(d.get(o..o + 2)?.try_into().ok()?))
 }
 
-fn be32(d: &[u8], o: usize) -> Option<u32> {
+pub fn be32(d: &[u8], o: usize) -> Option<u32> {
     Some(u32::from_be_bytes(d.get(o..o + 4)?.try_into().ok()?))
 }
 
@@ -113,7 +116,7 @@ fn walk_layout(rom: &[u8], mut at: usize) -> Option<Vec<(Part, Vec<usize>)>> {
             0x13 => {
                 let t = [2, 4, 6].map(|k| be16(rom, at + k).unwrap_or(0) as f32);
                 let dl = be32(rom, at + 8)? as usize & 0xFF_FFFF;
-                parts.push((Part { parent: *stack.last()?, offset: Vec3::from(t), slot: None }, if dl != 0 { vec![dl] } else { Vec::new() }));
+                parts.push((Part { parent: *stack.last()?, offset: Vec3::from(t), slot: None, lists: Vec::new() }, if dl != 0 { vec![dl] } else { Vec::new() }));
                 last = Some(parts.len() - 1);
                 at += 12;
             }
@@ -135,7 +138,7 @@ fn walk_layout(rom: &[u8], mut at: usize) -> Option<Vec<(Part, Vec<usize>)>> {
     }
 }
 
-fn load(rom: &[u8]) -> Option<Yoshi> {
+pub fn load(rom: &[u8]) -> Option<Yoshi> {
     // his layout starts like a few others: a round shadow, then the quarter scale
     const START: [u8; 20] = [0x16, 0, 0, 1, 0, 0xC8, 0, 0x64, 4, 0, 0, 0, 0x1D, 0, 0, 0, 0, 0, 0x40, 0];
     let mut at = find(rom, &START, 0)?;
@@ -179,6 +182,7 @@ fn load(rom: &[u8]) -> Option<Yoshi> {
                 p.slot = Some(slot);
                 slot += 1;
             }
+            p.lists = lists;
             p
         })
         .collect();
@@ -280,10 +284,11 @@ struct State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
-/// What he costs (debug): runs, time in all and the slowest run (ns) of tick [0] and apply [1].
-static COST: [[std::sync::atomic::AtomicU64; 3]; 2] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; 2];
+/// What he costs (debug): runs, time in all and the slowest run (ns) of tick [0], apply [1] and
+/// the trample [2].
+static COST: [[std::sync::atomic::AtomicU64; 3]; 3] = [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; 3];
 
-struct Timed(usize, Instant);
+pub struct Timed(pub usize, pub Instant);
 
 impl Drop for Timed {
     fn drop(&mut self) {
@@ -305,16 +310,18 @@ fn report_cost() {
     }
     *last = Some(Instant::now());
     let read = |i: usize| [0, 1, 2].map(|k| COST[i][k].swap(0, Relaxed) as f32);
-    let (tick, pose) = (read(0), read(1));
+    let (tick, pose, trample) = (read(0), read(1), read(2));
     if tick[0] > 0.0 && since > 0.0 {
         log(format!(
-            "yoshi: cost per frame {:.3} ms (finding him {:.3} ms, slowest {:.2}; posing {:.3} ms in {:.1} writes, slowest {:.2})",
-            (tick[1] + pose[1]) / tick[0] / 1e6,
+            "yoshi: cost per frame {:.3} ms (finding him {:.3} ms, slowest {:.2}; posing {:.3} ms in {:.1} writes, slowest {:.2}; trample {:.3} ms, slowest {:.2})",
+            (tick[1] + pose[1] + trample[1]) / tick[0] / 1e6,
             tick[1] / tick[0] / 1e6,
             tick[2] / 1e6,
             pose[1] / tick[0] / 1e6,
             pose[0] / tick[0],
-            pose[2] / 1e6
+            pose[2] / 1e6,
+            trample[1] / tick[0] / 1e6,
+            trample[2] / 1e6
         ));
     }
 }
@@ -358,12 +365,14 @@ pub fn call() {
 /// Once a frame: finds Torrent and moves the animation on (idle standing, the walk cycle at the
 /// pace he's going).
 pub fn tick() {
-    let Some(Some(yoshi)) = YOSHI.get() else { return };
+    // Without him (not in the ROM, or his model isn't built yet) Torrent stays as he is: his
+    // own pace and sounds, only the protection below.
+    let yoshi = YOSHI.get().and_then(|y| y.as_ref()).filter(|_| crate::assets::yoshi_ready());
     if crate::debug() {
         report_cost();
     }
     let _timed = Timed(0, Instant::now());
-    if CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+    if CALLED.swap(false, std::sync::atomic::Ordering::Relaxed) && yoshi.is_some() {
         crate::worker::call("yoshi voice", |_| unsafe { crate::sm64::sm64_play_sound_global(SOUND_YOSHI_TALK) });
     }
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -378,7 +387,9 @@ pub fn tick() {
             let t = &c.modules.time_act;
             let theirs = t.anim_queue[(t.read_idx % 10) as usize].anim_id;
             let airborne = !c.modules.physics.touching_solid_ground || JUMPS.contains(&theirs);
-            c.modules.behavior.animation_speed = if mounted && !airborne { RIDE_SPEED } else { 1.0 };
+            if yoshi.is_some() {
+                c.modules.behavior.animation_speed = if mounted && !airborne { RIDE_SPEED } else { 1.0 };
+            }
             // no hooves or rattling tack on Yoshi: the game's switch for a character's sounds
             // (it turns them on by distance) and the mimic veil's, which mutes steps
             // nothing lands on him: no damage, and no hit to break his stride (twice a second
@@ -407,8 +418,10 @@ pub fn tick() {
                     }
                 }
             }
-            c.chr_flags1ca.set_sounds_active(false);
-            c.chr_flags1c7.set_mimicry_enabled(true);
+            if yoshi.is_some() {
+                c.chr_flags1ca.set_sounds_active(false);
+                c.chr_flags1c7.set_mimicry_enabled(true);
+            }
             if crate::debug() {
                 static LAST: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
                 if LAST.swap(theirs, std::sync::atomic::Ordering::Relaxed) != theirs {
@@ -418,7 +431,7 @@ pub fn tick() {
             (c as *mut ChrIns as usize, c.field_ins_handle.clone(), c.modules.physics.position, airborne, theirs, mounted)
         })
     });
-    let Some((chr, handle, p, airborne, theirs, ridden)) = torrent else {
+    let (Some((chr, handle, p, airborne, theirs, ridden)), Some(yoshi)) = (torrent, yoshi) else {
         *state = None;
         return;
     };
@@ -470,6 +483,16 @@ pub fn tick() {
     s.pose = yoshi.pose(anim, s.at);
 }
 
+/// How far below Torrent's saddle Mario sits: on Yoshi's back, or not at all on the horse.
+pub fn seat_drop() -> f32 {
+    if active() { SEAT_DROP } else { 0.0 }
+}
+
+/// Torrent is Yoshi: he was found in the ROM and his model was there when the game started.
+pub fn active() -> bool {
+    crate::assets::yoshi_ready() && matches!(YOSHI.get(), Some(Some(_)))
+}
+
 /// At full speed with Mario on him: where he is and his velocity (trample.rs).
 pub fn charge() -> Option<(Vec3, Vec3)> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -495,6 +518,15 @@ pub fn apply() {
     };
     if live != Some(s.chr) {
         return;
+    }
+    // His tack still rattled with the sound switch set once a frame: the game turns it back on
+    // each frame by distance. Here it's set at every step of the frame, and on the rider too
+    // (the Tarnished's armour clinks along in the saddle).
+    unsafe { (*(s.chr as *mut ChrIns)).chr_flags1ca.set_sounds_active(false) };
+    if s.ridden {
+        if let Some(p) = wcm.main_player.as_mut() {
+            p.chr_ins.chr_flags1ca.set_sounds_active(false);
+        }
     }
     let raw = |a: usize| unsafe { *(a as *const usize) };
     // ChrIns +0x398 pose importer: +0x48 skeleton, +0x50 local / +0x60 model pose, 0x30 a bone

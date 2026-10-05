@@ -261,6 +261,43 @@ pub fn build_tpf(tpf: &[u8], albedo: &Image) -> Result<Vec<u8>, String> {
     Ok(t)
 }
 
+/// A mount's stand-in: its albedo (square, a multiple of the texture's size) over the textures
+/// named `*{key}_a`, a flat matte normal map over `*{key}_n` and nothing in the `_1m` mask, in the
+/// sizes and formats they have. The other textures stay.
+pub fn build_mount_tpf(tpf: &[u8], albedo: &Image, key: &str) -> Result<Vec<u8>, String> {
+    let mut t = tpf.to_vec();
+    for tex in tpf_textures(tpf) {
+        let base = tex.name.strip_suffix("_l").unwrap_or(&tex.name);
+        let Some(kind) = base.rsplit_once(key).map(|(_, kind)| kind) else { continue };
+        let dds = &tpf[tex.off..tex.off + tex.size];
+        let head = dds_header(dds);
+        let (h, w) = (u32_at(dds, 12), u32_at(dds, 16));
+        let body = match kind {
+            "_a" => {
+                if w == 0 || w > albedo.w || albedo.w % w != 0 || w != h {
+                    return Err(format!("unexpected albedo size {w}x{h}"));
+                }
+                bc1_mips(&albedo.shrink(albedo.w / w), tex.mips)
+            }
+            "_n" => {
+                // BC7 mode 6, constant (128, 128, 50, 254): flat normal, low shine
+                let mut bits: u128 = 1 << 6;
+                for (k, c7) in [64u128, 64, 64, 64, 25, 25, 127, 127].into_iter().enumerate() {
+                    bits |= c7 << (7 + 7 * k);
+                }
+                bits.to_le_bytes().repeat((tex.size - head) / 16)
+            }
+            "_1m" => vec![0; tex.size - head],
+            _ => continue,
+        };
+        if body.len() != tex.size - head {
+            return Err(format!("texture {} size mismatch ({} vs {})", tex.name, body.len(), tex.size - head));
+        }
+        t[tex.off + head..tex.off + tex.size].copy_from_slice(&body);
+    }
+    Ok(t)
+}
+
 // ---- BC7 ---------------------------------------------------------------------------------------
 
 const BC7_WEIGHTS: [f64; 16] = [0., 4., 9., 13., 17., 21., 26., 30., 34., 38., 43., 47., 51., 55., 60., 64.];

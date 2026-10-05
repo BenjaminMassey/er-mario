@@ -1374,8 +1374,9 @@ fn input_task() {
 /// On Yoshi Mario sits lower than the saddle the game seats him on.
 fn seat(mut parts: [engine_mario::PartPose; engine_mario::PARTS]) -> [engine_mario::PartPose; engine_mario::PARTS] {
     if RIDING.load(Ordering::Relaxed) {
+        let drop = yoshi::seat_drop();
         for p in &mut parts {
-            p.pos.y -= yoshi::SEAT_DROP;
+            p.pos.y -= drop;
         }
     }
     parts
@@ -2638,7 +2639,7 @@ fn frame(data: &FD4TaskData) {
         yoshi::tick();
         trample::update(&mut m.combat, m.ticks, data.delta_time.time, yoshi::charge());
         // the whistle itself isn't heard: Yoshi answers in its place (yoshi::call)
-        if matches!(cur, 50190 | 50191) {
+        if matches!(cur, 50190 | 50191) && yoshi::active() {
             let chr = &player_ref.chr_ins as *const eldenring::cs::ChrIns as *mut eldenring::cs::ChrIns;
             unsafe { (*chr).chr_flags1ca.set_sounds_active(false) };
         }

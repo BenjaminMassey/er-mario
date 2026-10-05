@@ -14,6 +14,7 @@ pub mod icons;
 pub mod matbin;
 pub mod model;
 pub mod tex;
+pub mod yoshi;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,13 +22,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{log, paths};
 
 /// Bump when the generated files change, so existing installs rebuild.
-const VERSION: &str = "er-mario assets 3";
+const VERSION: &str = "er-mario assets 5";
 const STAMP: &str = "package/.built";
 const PIECES: [&str; 4] = ["hd", "bd", "am", "lg"];
 const QUALITIES: [&str; 2] = ["hi", "low"];
 
 /// The package files were complete when the game started (so me3 serves them this session).
 static READY: AtomicBool = AtomicBool::new(false);
+/// ...and Yoshi's among them: Torrent's model c8002 and its textures. They're only there if he
+/// was found in the ROM.
+static YOSHI: AtomicBool = AtomicBool::new(false);
+const TORRENT: [&str; 3] = ["package/chr/c8002.chrbnd.dcx", "package/chr/c8002_h.texbnd.dcx", "package/chr/c8002_l.texbnd.dcx"];
+/// The mesh of Torrent's model Yoshi goes into: his body, with the simple material
+const TORRENT_BODY: usize = 7;
+
+/// Torrent is Yoshi this session.
+pub fn yoshi_ready() -> bool {
+    YOSHI.load(Ordering::Relaxed)
+}
 
 pub fn ready() -> bool {
     READY.load(Ordering::Relaxed)
@@ -91,6 +103,7 @@ pub fn check() -> bool {
     let complete = std::fs::read_to_string(paths::file(STAMP)).is_ok_and(|s| s.trim() == stamp())
         && outputs().iter().all(|f| paths::file(f).is_file());
     READY.store(complete, Ordering::Relaxed);
+    YOSHI.store(complete && TORRENT.iter().all(|f| paths::file(f).is_file()), Ordering::Relaxed);
     !complete
 }
 
@@ -178,7 +191,41 @@ pub fn build(model: &model::MarioModel) -> Result<(), String> {
         tex::patch_portrait(&mut tpf, i, if i == 0 { &hi } else { &low }, (w >> i, h >> i))?;
         write(&format!("package/menu/{q}/01_common.tpf.dcx"), &dcx::compress(&tpf)?)?;
     }
+    step(0.95, "Building Yoshi");
+    if let Err(e) = build_yoshi(&archives) {
+        // (Torrent stays Torrent then: none of his files may be left half done)
+        log(format!("assets: no Yoshi ({e})"));
+        for f in TORRENT {
+            let _ = std::fs::remove_file(paths::file(f));
+        }
+    }
     write(STAMP, stamp().as_bytes())?;
     log(format!("assets: all built in {:.1} s", t0.elapsed().as_secs_f32()));
+    Ok(())
+}
+
+/// Yoshi in Torrent's place: his mesh into the body mesh of c8002, his colours and eyes over
+/// the body's textures.
+fn build_yoshi(archives: &archive::Archives) -> Result<(), String> {
+    let rom = paths::read_rom()?;
+    let model = yoshi::model(&rom).ok_or("he wasn't found in the ROM")?;
+    let src = dcx::decompress(&archives.read("/chr/c8002.chrbnd.dcx")?)?;
+    let mut files = bnd4::read(&src)?;
+    let f = files.iter_mut().find(|f| f.name.to_lowercase().ends_with(".flver")).ok_or("Torrent's model has no FLVER")?;
+    let fl = flver::Flver::new(std::mem::take(&mut f.data))?;
+    f.data = flver::build_mount(fl, &crate::yoshi::BONES, &model.verts, &model.tris, TORRENT_BODY)?;
+    let mut out = vec![(TORRENT[0], dcx::compress(&bnd4::build(&src, &files))?)];
+    for path in &TORRENT[1..] {
+        let src = dcx::decompress(&archives.read(&path["package".len()..])?)?;
+        let mut files = bnd4::read(&src)?;
+        let f = files.iter_mut().find(|f| f.name.to_lowercase().ends_with(".tpf")).ok_or("Torrent's textures have no TPF")?;
+        f.data = tex::build_mount_tpf(&f.data, &model.albedo, "Body")?;
+        out.push((path, dcx::compress(&bnd4::build(&src, &files))?));
+    }
+    // all three or none
+    for (path, data) in &out {
+        write(path, data)?;
+    }
+    log(format!("assets: Yoshi built ({} vertices)", model.verts.len()));
     Ok(())
 }

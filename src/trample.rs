@@ -44,6 +44,7 @@ static RECENT: Mutex<Option<HashMap<u64, Instant>>> = Mutex::new(None);
 
 /// Every frame. `charge`: where Yoshi is and how fast he's going, while he's at full speed.
 pub fn update(combat: &mut Combat, tick: u32, dt: f32, charge: Option<(Vec3, Vec3)>) {
+    let _timed = crate::yoshi::Timed(2, Instant::now());
     let mut flung = FLUNG.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, vel)) = charge {
         let mut recent = RECENT.lock().unwrap_or_else(|e| e.into_inner());
