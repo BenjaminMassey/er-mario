@@ -22,8 +22,10 @@ const BETWEEN: [&str; 5] = ["L_Clavicle", "R_Clavicle", "Neck", "Neck1", "Neck2"
 const TORSO: usize = 1;
 /// SM64 units -> metres, times the 0.25 scale node of his geo layout
 const UNIT: f32 = 0.01 * 0.25;
-/// On top of that, so he's a size to ride (the bones carry it as their scale)
-const SIZE: f32 = 1.6;
+/// On top of that: about his size next to Mario in SM64 (the bones carry it as their scale)
+const SIZE: f32 = 1.1;
+/// Torrent's saddle is where his back was at 1.6 times: Mario comes down by the difference.
+pub const SEAT_DROP: f32 = 0.85 * (1.6 - SIZE);
 const IDLE: usize = 0;
 const WALK: usize = 1;
 /// The walk cycle's own pace (m/s at SIZE 1): faster rides play it faster.

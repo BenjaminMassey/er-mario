@@ -1367,6 +1367,16 @@ fn input_task() {
     }
 }
 
+/// On Yoshi Mario sits lower than the saddle the game seats him on.
+fn seat(mut parts: [engine_mario::PartPose; engine_mario::PARTS]) -> [engine_mario::PartPose; engine_mario::PARTS] {
+    if RIDING.load(Ordering::Relaxed) {
+        for p in &mut parts {
+            p.pos.y -= yoshi::SEAT_DROP;
+        }
+    }
+    parts
+}
+
 /// Torrent takes no damage in Mario mode. Looked up twice a second, he comes and goes.
 fn torrent_cant_die() {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -2841,8 +2851,8 @@ fn frame(data: &FD4TaskData) {
             // between ticks while the model turns with the Tarnished)
             let q = glam::Quat::from_rotation_y(PI - m.state.face_angle);
             *engine_mario::POSE.lock().unwrap_or_else(|e| e.into_inner()) = match (&m.prev_parts, &m.parts) {
-                (Some(a), Some(b)) => Some(engine_mario::to_character(&engine_mario::blend(a, b, alpha), q)),
-                (None, Some(b)) => Some(engine_mario::to_character(b, q)),
+                (Some(a), Some(b)) => Some(seat(engine_mario::to_character(&engine_mario::blend(a, b, alpha), q))),
+                (None, Some(b)) => Some(seat(engine_mario::to_character(b, q))),
                 _ => None,
             };
             return;
