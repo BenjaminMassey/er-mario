@@ -560,6 +560,35 @@ fn set_player_hp(hp: i32) {
     }
 }
 
+/// Mario doesn't get Elden Ring's ailments. They have no place on a health meter of eight wedges,
+/// and nothing in SM64 cures them. Poison, scarlet rot, blood loss, deathblight, frostbite and
+/// madness never build up: their gauges are kept full. Sleep stays.
+fn no_ailments() {
+    use eldenring::cs::GameDataMan;
+    // the gauges in the order of the resistances: poison, rot, blood loss, deathblight, frost,
+    // sleep (5, left out), madness
+    const BUILD_UPS: [usize; 6] = [0, 1, 2, 3, 4, 6];
+    // The character's resist module (module container +0x20): +0x10 the seven gauges (what's
+    // left of each resistance: they run down as an ailment builds up, and it sets in at 0),
+    // +0x2c their maxima. The game data has the same numbers, but only as a copy for the menus.
+    const GAUGES: usize = 0x10;
+    const MAXIMA: usize = 0x2c;
+    let Some(player) = (unsafe { WorldChrMan::instance() }).ok().and_then(|w| w.main_player.as_ref()) else { return };
+    let Ok(gdm) = (unsafe { GameDataMan::instance() }) else { return };
+    let max = gdm.main_player_game_data.resistance_gauge_max;
+    let module = unsafe { *((&*player.chr_ins.modules as *const _ as usize + 0x20) as *const usize) };
+    if max[0] == 0 || !explore::readable(module, 0x50) {
+        return;
+    }
+    // (only where the module is laid out as expected)
+    if unsafe { *((module + MAXIMA) as *const [u32; 7]) } != max {
+        return;
+    }
+    for i in BUILD_UPS {
+        unsafe { *((module + GAUGES + i * 4) as *mut u32) = max[i] };
+    }
+}
+
 /// Set when the Tarnished sits down at a site of grace (Mario's health refills).
 static REST: AtomicBool = AtomicBool::new(false);
 static SM64_READY: AtomicBool = AtomicBool::new(false);
@@ -2138,6 +2167,7 @@ fn frame(data: &FD4TaskData) {
             }
             if !m.dead && data.hp > 0 {
                 set_player_hp(data.max_hp);
+                no_ailments();
             }
             hurt
         };
