@@ -21,6 +21,7 @@ mod hud;
 mod moving;
 mod collision_geometry;
 mod throw_collision;
+mod trample;
 mod names;
 mod notes;
 mod paths;
@@ -2635,6 +2636,7 @@ fn frame(data: &FD4TaskData) {
         let riding = player_ref.chr_ins.modules.ride.is_mounted || mount_anim(cur);
         torrent_cant_die();
         yoshi::tick();
+        trample::update(&mut m.combat, m.ticks, data.delta_time.time, yoshi::charge());
         // the whistle itself isn't heard: Yoshi answers in its place (yoshi::call)
         if matches!(cur, 50190 | 50191) {
             let chr = &player_ref.chr_ins as *const eldenring::cs::ChrIns as *mut eldenring::cs::ChrIns;
@@ -2658,8 +2660,17 @@ fn frame(data: &FD4TaskData) {
                 ));
             }
         }
-        if RIDING.swap(riding, Ordering::Relaxed) != riding {
+        let was_riding = RIDING.swap(riding, Ordering::Relaxed);
+        if was_riding != riding {
             log(format!("ride: {} (anim {cur})", if riding { "on Torrent" } else { "off" }));
+        }
+        // In the saddle nothing lands on Mario. It's the rider enemies hit, not the mount: he
+        // flinches, the mount plays its flinch along and stops, and a few hits throw him off
+        // (poise didn't stop the flinch). Hits are switched off on the Tarnished while he rides.
+        if riding || was_riding {
+            if let Some(p) = (unsafe { WorldChrMan::instance_mut() }).ok().and_then(|w| w.main_player.as_mut()) {
+                p.chr_ins.debug_flags.set_disabled_hit(riding);
+            }
         }
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
         let mut follow = FOLLOW.lock().unwrap_or_else(|e| e.into_inner());

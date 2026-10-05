@@ -259,6 +259,30 @@ pub fn is_torrent(chr: &ChrIns) -> bool {
     handle_key(&gdm.main_player_game_data.mount_handle) == handle_key(&chr.field_ins_handle)
 }
 
+/// Enemies within `reach` of a point, their own width added: handle, key, and whether it's a
+/// boss or one of the strong ones.
+pub fn in_the_way(at: glam::Vec3, reach: f32) -> Vec<(FieldInsHandle, u64, bool)> {
+    let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return Vec::new() };
+    let mut out = Vec::new();
+    for set in wcm.chr_sets.iter().flatten() {
+        for chr in set.characters() {
+            let chr: &ChrIns = chr;
+            if !hittable(chr.chr_type) || chr.modules.data.hp <= 0 || chr.team_type == 0 || own_side(chr.team_type) {
+                continue;
+            }
+            let (p, ph) = (chr.modules.physics.position, &chr.modules.physics);
+            let width = ph.hit_radius.max(ph.chr_hit_radius).clamp(0.3, 4.0);
+            let (dx, dy, dz) = (p.0 - at.x, p.1 - at.y, p.2 - at.z);
+            if dx * dx + dz * dz > (reach + width).powi(2) || !(-3.0..2.0).contains(&dy) || is_torrent(chr) {
+                continue;
+            }
+            let handle = chr.field_ins_handle;
+            out.push((handle, handle_key(&handle), is_boss(&handle) || chr.team_type == TEAM_STRONG_ENEMY));
+        }
+    }
+    out
+}
+
 /// Characters within `range` metres of `center` (not the player, alive).
 pub fn nearby(center: &HavokPosition, range: f32, origin: [f32; 3]) -> Vec<Target> {
     let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return Vec::new() };

@@ -34,6 +34,8 @@ const SOUND_YOSHI_WALK: i32 = 0x306E_2081;
 const SOUND_YOSHI_TALK: i32 = 0x3070_3081;
 /// Torrent's jump and his second one in the air
 const JUMPS: [i32; 2] = [6130, 6131];
+/// From this speed (m/s) he runs enemies over: his sprint is 20 to 23, a run around 13
+const CHARGE_SPEED: f32 = 16.0;
 const IDLE: usize = 0;
 const WALK: usize = 1;
 const JUMP: usize = 2;
@@ -271,6 +273,9 @@ struct State {
     bones: Option<(usize, [usize; 22])>,
     /// Torrent's own animation
     theirs: i32,
+    /// his speed over the ground (m/s), a little smoothed, and whether Mario's on him
+    vel: Vec3,
+    ridden: bool,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -376,6 +381,32 @@ pub fn tick() {
             c.modules.behavior.animation_speed = if mounted && !airborne { RIDE_SPEED } else { 1.0 };
             // no hooves or rattling tack on Yoshi: the game's switch for a character's sounds
             // (it turns them on by distance) and the mimic veil's, which mutes steps
+            // nothing lands on him: no damage, and no hit to break his stride (twice a second
+            // wasn't enough for the health, torrent_cant_die: a hard hit still killed him)
+            c.debug_flags.set_disabled_hit(true);
+            c.chr_flags1c5.set_is_invincible(true);
+            if c.modules.data.hp > 0 {
+                c.modules.data.hp = c.modules.data.max_hp;
+            }
+            // (hits on him landed all the same, with a flinch each and his end after a few:
+            // the dodge frames' switch, poise no hit gets through, and the health the game keeps
+            // for the mount on the player's side, which is the one it goes by)
+            c.modules.action_flag.action_modifiers_flags.set_perfect_invincibility(true);
+            c.modules.super_armor.sa_durability = 1.0e6;
+            c.modules.toughness.toughness = 1.0e6;
+            if let Ok(gdm) = unsafe { eldenring::cs::GameDataMan::instance() } {
+                let ride = unsafe { *((gdm.main_player_game_data.as_ptr() as usize + 0x8e0) as *const usize) };
+                if ride != 0 && explore::readable(ride, 0x40) {
+                    let hp = (ride + 0x30) as *mut u32;
+                    let (now, full) = (unsafe { *hp }, c.modules.data.max_hp.max(1) as u32);
+                    if now != 0 && now < full {
+                        if crate::debug() && full - now > 20 {
+                            log(format!("yoshi: the mount's health was at {now} of {full}"));
+                        }
+                        unsafe { *hp = full };
+                    }
+                }
+            }
             c.chr_flags1ca.set_sounds_active(false);
             c.chr_flags1c7.set_mimicry_enabled(true);
             if crate::debug() {
@@ -384,25 +415,38 @@ pub fn tick() {
                     log(format!("yoshi: Torrent anim -> {theirs} (airborne {airborne})"));
                 }
             }
-            (c as *mut ChrIns as usize, c.field_ins_handle.clone(), c.modules.physics.position, airborne, theirs)
+            (c as *mut ChrIns as usize, c.field_ins_handle.clone(), c.modules.physics.position, airborne, theirs, mounted)
         })
     });
-    let Some((chr, handle, p, airborne, theirs)) = torrent else {
+    let Some((chr, handle, p, airborne, theirs, ridden)) = torrent else {
         *state = None;
         return;
     };
     let pos = Vec3::new(p.0, p.1, p.2);
     let now = Instant::now();
-    let s = state.get_or_insert_with(|| State { chr, handle: handle.clone(), pose: yoshi.pose(IDLE, 0.0), anim: IDLE, at: 0.0, last: now, pos, bones: None, theirs });
+    let s = state.get_or_insert_with(|| State { chr, handle: handle.clone(), pose: yoshi.pose(IDLE, 0.0), anim: IDLE, at: 0.0, last: now, pos, bones: None, theirs, vel: Vec3::ZERO, ridden: false });
     if s.chr != chr {
         (s.chr, s.handle, s.bones, s.pos) = (chr, handle, None, pos);
     }
     let dt = now.duration_since(s.last).as_secs_f32().min(0.1);
     s.last = now;
-    let moved = Vec3::new(pos.x - s.pos.x, 0.0, pos.z - s.pos.z).length();
+    let step = Vec3::new(pos.x - s.pos.x, 0.0, pos.z - s.pos.z);
+    let moved = step.length();
     s.pos = pos;
     // (a jump of the world's origin isn't a gallop)
     let speed = if dt > 0.0 && moved < 5.0 { moved / dt } else { 0.0 };
+    if dt > 0.0 && moved < 5.0 {
+        s.vel = s.vel.lerp(step / dt, 0.3);
+    }
+    s.ridden = ridden;
+    if crate::debug() && ridden {
+        static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_none_or(|t| t.elapsed().as_secs_f32() > 1.0) && s.vel.length() > 1.0 {
+            *last = Some(now);
+            log(format!("yoshi: going {:.1} m/s", s.vel.length()));
+        }
+    }
     let anim = if airborne && yoshi.anims.len() > JUMP {
         JUMP
     } else if speed > 0.5 {
@@ -424,6 +468,13 @@ pub fn tick() {
         crate::worker::call("yoshi step", |_| unsafe { crate::sm64::sm64_play_sound_global(SOUND_YOSHI_WALK) });
     }
     s.pose = yoshi.pose(anim, s.at);
+}
+
+/// At full speed with Mario on him: where he is and his velocity (trample.rs).
+pub fn charge() -> Option<(Vec3, Vec3)> {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let s = state.as_ref()?;
+    (s.ridden && s.last.elapsed().as_secs_f32() < 0.1 && s.vel.length() > CHARGE_SPEED).then_some((s.pos, s.vel))
 }
 
 /// Puts his pose on Torrent's bones (after the game's animation, in every pose task).
