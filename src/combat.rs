@@ -291,8 +291,9 @@ pub fn in_the_way(at: glam::Vec3, reach: f32) -> Vec<(FieldInsHandle, u64, bool)
 }
 
 /// Enemies whose hits count for less against Mario: character id (cXXXX) and how much of the
-/// hit is left. The Godskin Noble (c3550, the fat one with the rapier) took three wedges a hit.
-const SOFTER: [(u32, f32); 1] = [(3550, 0.6)];
+/// hit is left. The Godskins took three wedges a hit: the Noble (c3550, the fat one with the
+/// rapier) and the Apostle (c3560, the tall one), which covers the Godskin Duo too.
+const SOFTER: [(u32, f32); 2] = [(3550, 0.6), (3560, 0.6)];
 
 /// Who hit the player last (character id), and what's left of his hits (1 = all of it).
 pub fn last_attacker(player: &ChrIns) -> (Option<u32>, f32) {
