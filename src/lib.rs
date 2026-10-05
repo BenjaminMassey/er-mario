@@ -2184,7 +2184,13 @@ fn frame(data: &FD4TaskData) {
             // coins behind walls and hills stay hidden: a ray from the camera to each coin
             if let (Ok(cam), Ok(havok)) = (unsafe { CSCamera::instance() }, unsafe { eldenring::cs::CSHavokMan::instance() }) {
                 let c = cam.pers_cam_1.position();
-                coins::update_visibility(glam::Vec3::new(c.0, c.1, c.2), |from, to| {
+                // (and behind Mario or anyone near him)
+                let mut bodies = vec![(glam::Vec3::new(me.0, me.1, me.2), 0.4, 1.2)];
+                bodies.extend(targets.iter().filter(|t| !t.is_prop()).map(|t| {
+                    let p = to_er(m.origin, t.sm);
+                    (glam::Vec3::new(p.0, p.1, p.2), t.radius / 100.0, t.height / 100.0)
+                }));
+                coins::update_visibility(glam::Vec3::new(c.0, c.1, c.2), &bodies, |from, to| {
                     let d = to - from;
                     let len = d.length();
                     let start = HavokPosition(from.x, from.y, from.z, 0.0);
