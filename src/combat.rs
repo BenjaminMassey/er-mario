@@ -56,6 +56,16 @@ impl Attack {
         }
     }
 
+    /// On bosses the quick hits count for a bit more than their share: with a twentieth of it
+    /// each, only ground pounds and stomps were worth doing.
+    fn boss_bonus(self) -> f32 {
+        match self {
+            Attack::Punch | Attack::Kick | Attack::Sweep => 1.2,
+            Attack::Dash => 1.1,
+            Attack::Stomp | Attack::GroundPound => 1.0,
+        }
+    }
+
     const ALL: [Attack; 6] = [Attack::Punch, Attack::Kick, Attack::Sweep, Attack::GroundPound, Attack::Stomp, Attack::Dash];
 }
 
@@ -516,7 +526,7 @@ fn take_share(handle: &FieldInsHandle, attack: Attack) -> bool {
     let (default, key) = attack.percent();
     let mut pct = config_f32(key, default);
     if boss {
-        pct *= config_f32("boss_damage_factor", BOSS_FACTOR);
+        pct *= config_f32("boss_damage_factor", BOSS_FACTOR) * attack.boss_bonus();
         if let Some((t, tmax)) = crate::swing::toughness_of(handle) {
             log(format!("combat: boss poise {t:.0}/{tmax:.0}"));
         }
