@@ -1,6 +1,6 @@
-//! Yoshi instead of Torrent. His model sits in Torrent's own (tools/build_yoshi.py for now), every
-//! part bound to one horse bone; here his animations are read from the SM64 ROM and those bones
-//! posed with them each frame, after the game's animation.
+//! Yoshi instead of Torrent. His model sits in Torrent's own (assets/yoshi.rs builds it from
+//! the ROM), every part bound to one horse bone; here his animations are read from the SM64 ROM
+//! and those bones posed with them each frame, after the game's animation.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;

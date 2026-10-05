@@ -16,9 +16,12 @@ const NOTES: &str = concat!(
     "ER Mario ",
     env!("CARGO_PKG_VERSION"),
     " Patch notes:\n\n",
-    "* Mario is immune to poison, scarlet rot, bleed, frostbite, madness and deathblight.\n",
-    "* Punches and kicks do 20% more damage to bosses, dives 10% more.\n",
-    "* Fixed small hitches when playing in a language other than English."
+    "* Yoshi is here! Torrent is now Yoshi. Whistle for him with RB, RT or R on keyboard\n",
+    "* Yoshi runs twice as fast and tramples enemies at a sprint.\n",
+    "* Fixed some bosses second phases not starting.\n",
+    "* Godskin bosses do less damage.\n",
+    "* Coins are hidden behind Mario and enemies.\n",
+    "* Fixed freezes and hitches some players had."
 );
 
 /// Which version's notes were shown last.

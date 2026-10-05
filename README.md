@@ -49,7 +49,6 @@ work through Steam Input, which Steam turns on for them by default.
 
 - While alot of them should be fixed, there is still a chance that you might clip through some elevators. Let me know which ones and I will fix them ASAP.
 - Cutscenes show a crumpled Mario with the Tarnished's head.
-- Torrent can't be summoned in Mario mode, so there is currently no way to use spiritsprings. 
 - Some big bosses' ragdolls go wild after a throw; the mod stops them early.
 - Mario's shadow can flicker or drop out from some camera angles in sunlight and moonlight.
 - With a controller, Mario can sometimes keep flicking between two directions while you
