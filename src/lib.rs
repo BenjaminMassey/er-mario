@@ -2664,12 +2664,34 @@ fn frame(data: &FD4TaskData) {
         if was_riding != riding {
             log(format!("ride: {} (anim {cur})", if riding { "on Torrent" } else { "off" }));
         }
-        // In the saddle nothing lands on Mario. It's the rider enemies hit, not the mount: he
-        // flinches, the mount plays its flinch along and stops, and a few hits throw him off
-        // (poise didn't stop the flinch). Hits are switched off on the Tarnished while he rides.
-        if riding || was_riding {
+        // In the saddle it's the rider enemies hit (he flinches, the mount with him, and a few
+        // hits throw him off). The SM64 tick that turns the Tarnished's lost health into Mario's
+        // doesn't run while the game drives, so it's done here: wedges off, his HP back to full.
+        if riding && !m.dead {
+            let (hp, max) = (player_ref.chr_ins.modules.data.hp, player_ref.chr_ins.modules.data.max_hp);
+            let wedges = match m.combat.took_damage(hp, max) {
+                Some(combat::Hurt::Hit(n)) => n as i32,
+                Some(combat::Hurt::Drain) => 1,
+                None => 0,
+            };
+            if wedges > 0 {
+                let health = (m.state.health as i32 - wedges * 0x100).max(0xFF);
+                m.state.health = health as i16;
+                let id = m.id;
+                worker::call("ride hurt", move |_| unsafe { sm64::sm64_set_mario_health(id, health as u16) });
+                log(format!("ride: hit in the saddle, {wedges} wedge(s), health {health:#x}"));
+                if health < 0x100 {
+                    log("Mario is out of health");
+                    set_player_hp(0);
+                }
+            }
+            if hp > 0 && m.state.health >= 0x100 {
+                set_player_hp(max);
+            }
+        }
+        if was_riding && !riding {
             if let Some(p) = (unsafe { WorldChrMan::instance_mut() }).ok().and_then(|w| w.main_player.as_mut()) {
-                p.chr_ins.debug_flags.set_disabled_hit(riding);
+                p.chr_ins.debug_flags.set_disabled_hit(false);
             }
         }
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());

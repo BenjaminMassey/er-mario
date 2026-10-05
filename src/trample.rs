@@ -17,16 +17,20 @@ use crate::log;
 const HIT: f32 = 30.0;
 const HIT_STRONG: f32 = 5.0;
 /// How near his path (m, on top of the enemy's own width)
-const REACH: f32 = 0.9;
+const REACH: f32 = 1.5;
+/// ...and how far ahead of him its middle is (m): they go flying before they can swing
+const AHEAD: f32 = 1.6;
 /// The same enemy isn't hit again this soon (s); longer than it lies there, since the game
 /// takes a hit on its ragdoll for a kill
 const AGAIN: f32 = 5.0;
 /// Pushed along for this long (s) before it goes limp: the ragdoll takes over the speed it has
 const PUSHED: f32 = 0.1;
 const DOWN: f32 = 4.0;
-/// Thrown ahead at this share of his speed, and up (m/s)
-const CARRY: f32 = 0.7;
-const LIFT: f32 = 5.0;
+/// SOUND_ACTION_BOUNCE_OFF_OBJECT
+const SOUND_BUMP: i32 = 0x0459_B081;
+/// Thrown ahead at this much of his speed, and up (m/s)
+const CARRY: f32 = 1.1;
+const LIFT: f32 = 6.5;
 
 struct Flung {
     handle: FieldInsHandle,
@@ -45,15 +49,14 @@ pub fn update(combat: &mut Combat, tick: u32, dt: f32, charge: Option<(Vec3, Vec
         let mut recent = RECENT.lock().unwrap_or_else(|e| e.into_inner());
         let recent = recent.get_or_insert_with(HashMap::new);
         recent.retain(|_, t| t.elapsed().as_secs_f32() < AGAIN);
-        // (a little ahead of him: at this speed he's past them a frame later)
-        let ahead = at + vel.normalize_or_zero() * 0.8;
+        let ahead = at + vel.normalize_or_zero() * AHEAD;
         for (handle, key, strong) in combat::in_the_way(ahead, REACH) {
             if recent.contains_key(&key) {
                 continue;
             }
             recent.insert(key, Instant::now());
             combat::impact(combat, &handle, if strong { HIT_STRONG } else { HIT }, tick);
-            crate::worker::call("trample sound", |_| unsafe { crate::sm64::sm64_play_sound_global(crate::swing::SOUND_IMPACT) });
+            crate::worker::call("trample sound", |_| unsafe { crate::sm64::sm64_play_sound_global(SOUND_BUMP) });
             log(format!("trample: ran into {} at {:.1} m/s", if strong { "a strong enemy" } else { "an enemy" }, vel.length()));
             if !strong {
                 flung.push(Flung { handle, vel: vel * CARRY + Vec3::Y * LIFT, since: Instant::now(), limp: false });
