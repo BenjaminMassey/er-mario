@@ -88,20 +88,35 @@ pub(crate) fn dlog(msg: impl AsRef<str>) {
 /// logs\er_mario.log in the mod folder (its own folder, so players find it to send it), started
 /// fresh every launch; the previous session's stays as logs\er_mario.prev.log.
 pub(crate) fn log(msg: impl AsRef<str>) {
-    static FRESH: std::sync::Once = std::sync::Once::new();
-    let path = paths::file("logs/er_mario.log");
-    FRESH.call_once(|| {
-        let _ = std::fs::create_dir_all(paths::file("logs"));
-        // (versions before 0.3.2 kept the log next to the DLL: it becomes the previous one)
-        let (old, old_prev) = (paths::file("er_mario.log"), paths::file("er_mario.prev.log"));
-        let previous = if old.is_file() { old } else { path.clone() };
-        let _ = std::fs::rename(previous, paths::file("logs/er_mario.prev.log"));
-        let _ = std::fs::remove_file(old_prev);
-        let _ = std::fs::write(&path, "");
+    // Written by a thread of its own, through a file that stays open. Opening and closing the
+    // log for every line on the game's thread could take milliseconds a time (antivirus looks
+    // at every open), and some moments write several lines: a hitch each.
+    static LINES: std::sync::OnceLock<Mutex<std::sync::mpsc::Sender<String>>> = std::sync::OnceLock::new();
+    let lines = LINES.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let path = paths::file("logs/er_mario.log");
+            let _ = std::fs::create_dir_all(paths::file("logs"));
+            // (versions before 0.3.2 kept the log next to the DLL: it becomes the previous one)
+            let (old, old_prev) = (paths::file("er_mario.log"), paths::file("er_mario.prev.log"));
+            let previous = if old.is_file() { old } else { path.clone() };
+            let _ = std::fs::rename(previous, paths::file("logs/er_mario.prev.log"));
+            let _ = std::fs::remove_file(old_prev);
+            let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(&path).ok();
+            while let Ok(line) = rx.recv() {
+                if file.is_none() {
+                    file = OpenOptions::new().create(true).append(true).open(&path).ok();
+                }
+                if let Some(f) = file.as_mut() {
+                    if writeln!(f, "{line}").is_err() {
+                        file = None;
+                    }
+                }
+            }
+        });
+        Mutex::new(tx)
     });
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{}", msg.as_ref());
-    }
+    let _ = lines.lock().unwrap_or_else(|e| e.into_inner()).send(msg.as_ref().to_string());
 }
 
 /// `debug = 1` in er_mario.ini: developer keys (F3-F6, F8-F12) and detailed logging.
