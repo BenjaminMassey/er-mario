@@ -2946,7 +2946,8 @@ pub unsafe extern "C" fn DllMain(hmodule: usize, reason: u32) -> bool {
     MODULE.store(hmodule, Ordering::Relaxed);
     std::thread::spawn(|| {
         log(format!("er-mario {} loaded", env!("CARGO_PKG_VERSION")));
-        let cs_task = CSTaskImp::wait_for_instance(Duration::MAX).unwrap();
+        // (before anything is waited for: on another game version the task system below may
+        // never be found, and the mod sat there without a word)
         if let Err(e) = version::check() {
             log(format!("this game version is not supported ({e}); ER Mario stays off"));
             unsafe {
@@ -2959,6 +2960,13 @@ pub unsafe extern "C" fn DllMain(hmodule: usize, reason: u32) -> bool {
             return;
         }
         std::panic::set_hook(Box::new(|info| log(format!("PANIC: {info}"))));
+        let started = std::time::Instant::now();
+        let cs_task = loop {
+            match CSTaskImp::wait_for_instance(Duration::from_secs(30)) {
+                Ok(task) => break task,
+                Err(_) => log(format!("still waiting for the game to start up ({:.0} s)", started.elapsed().as_secs_f32())),
+            }
+        };
         unsafe { install_xinput_hooks() };
         unsafe { kbd::install_hooks() };
         // on its own thread: where the overlay can't hook the renderer (CrossOver on a Mac died
