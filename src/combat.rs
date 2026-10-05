@@ -122,6 +122,8 @@ const _: () = assert!(size_of::<SpawnRequest>() == 0x110);
 
 /// The bullets' own (flat) damage: just enough to always land the final blow.
 const BULLET_DAMAGE: u16 = 10;
+/// ...and the share of the bare fist's attack they hit with (%)
+const FIST_SHARE: u16 = 100;
 /// Share of the normal damage bosses (anything with a boss health bar) take.
 const BOSS_FACTOR: f32 = 0.05;
 const INVADER_FACTOR: f32 = 0.25;
@@ -165,10 +167,13 @@ fn patch_params() -> bool {
         b.set_is_penetrate_map(true);
         b.set_is_hit_both_team(false);
         let Some(a) = repo.get_mut::<AtkParam_Pc>(atk) else { return false };
-        // the real damage is a share of the target's max HP (Combat::deal); the bullet itself only
-        // chips (and lands the final blow), whatever the weapon and stats
+        // The damage that counts is a share of the target's max HP (Combat::deal). On top, the
+        // bullet is a real hit with the Tarnished's bare fist. As a flat number alone it took
+        // nothing off a boss, whatever the number, so no blow was ever the game's own: a boss
+        // at his last point had to be ended by hand, and one whose script waits for a damaging
+        // hit there (Malenia's second phase) never got it.
         let _ = damage;
-        a.set_atk_phys_correction(0);
+        a.set_atk_phys_correction(FIST_SHARE);
         a.set_atk_mag_correction(0);
         a.set_atk_fire_correction(0);
         a.set_atk_thun_correction(0);
@@ -185,7 +190,7 @@ fn patch_params() -> bool {
         a.set_atk_super_armor(poise * 0.8);
         a.set_dmg_level(level);
         a.set_atk_attribute(1); // strike
-        a.set_is_add_base_atk(false);
+        a.set_is_add_base_atk(true);
         a.set_oppose_target(true);
         a.set_friendly_target(false);
         a.set_self_target(false);
@@ -418,6 +423,38 @@ fn boss_class(handle: &FieldInsHandle, chr: &ChrIns) -> bool {
 /// How long a boss at his last point is left to his script before he's finished by hand (SM64
 /// ticks, 30 a second).
 const BOSS_FINISH_TICKS: u32 = 90;
+/// A boss stuck at his last point, and what the real blows on him showed.
+#[derive(Default)]
+struct Probe {
+    /// tick a blow was sent at, while its bullet lives
+    fired: Option<u32>,
+    misses: u32,
+    undying: bool,
+}
+
+static PROBES: std::sync::Mutex<Option<HashMap<u64, Probe>>> = std::sync::Mutex::new(None);
+/// How long a blow's bullet gets to land (ticks), and how many may miss before he's ended by hand
+const PROBE_TICKS: u32 = 10;
+const PROBE_MISSES: u32 = 3;
+/// What the punch's bullet does for a real blow, and the tick it goes back to its chip at.
+/// (not above 32767: at 60000 the blow made her flinch and took nothing off, as if the game
+/// read the number as a signed one)
+const FINISHER_DAMAGE: u16 = 30000;
+static FINISHER_UNTIL: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+
+/// A punch that does real damage, where the others only chip: the punch's attack is turned up
+/// for the few ticks its bullet lives.
+fn finisher(player: &ChrIns, at: &HavokPosition, tick: u32) -> String {
+    let (bullet, atk, ..) = Attack::Punch.spec();
+    let Some(a) = (unsafe { SoloParamRepository::instance_mut() }).ok().and_then(|r| r.get_mut::<AtkParam_Pc>(atk)) else { return "no attack param".into() };
+    // (flat damage alone took nothing off her, at 60000 or 30000: also as a share of the
+    // weapon's attack, with the weapon's own added, whichever of them the game goes by)
+    a.set_atk_phys(FINISHER_DAMAGE);
+    a.set_atk_phys_correction(10000);
+    *FINISHER_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = Some(tick.wrapping_add(8));
+    strike(player, at, bullet)
+}
+
 /// Bosses whose script took over at their last point: Mario's hits do nothing more to them.
 static SCRIPTED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 
@@ -612,6 +649,10 @@ fn take_share(handle: &FieldInsHandle, attack: Attack) -> bool {
     if crate::swing::is_down(handle) || hands_off(handle) {
         return false;
     }
+    // (nor while a real blow is finding out whether he can die: his health is the answer)
+    if PROBES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|p| p.get(&handle_key(handle)).is_some_and(|p| p.fired.is_some())) {
+        return false;
+    }
     let Some(chr) = wcm.chr_ins_by_handle_mut(handle) else { return false };
     let team = chr.team_type;
     if own_side(team) {
@@ -701,11 +742,24 @@ impl Combat {
             }
         }
         self.cooldown.retain(|_, t| tick.wrapping_sub(*t) < 12);
+        {
+            let mut until = FINISHER_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+            if until.is_some_and(|u| tick.wrapping_sub(u) < u32::MAX / 2) {
+                if let Some(a) = (unsafe { SoloParamRepository::instance_mut() }).ok().and_then(|r| r.get_mut::<AtkParam_Pc>(Attack::Punch.spec().1)) {
+                    a.set_atk_phys(BULLET_DAMAGE);
+                    a.set_atk_phys_correction(FIST_SHARE);
+                }
+                *until = None;
+            }
+        }
         // the final blow is the bullet's; if it can't land (some small or odd characters), finish
         // them after 0.5 s
         self.finishing.retain(|key, (handle, t)| {
             let Some(chr) = unsafe { WorldChrMan::instance_mut() }.ok().and_then(|w| w.chr_ins_by_handle_mut(handle)) else { return false };
-            if chr.modules.data.hp != 1 {
+            // (2 only while a real blow is on its way, see below)
+            let probing = PROBES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|p| p.get(key).is_some_and(|p| p.fired.is_some()));
+            if chr.modules.data.hp != 1 && !(probing && chr.modules.data.hp == 2) {
+                PROBES.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(|p| p.remove(key));
                 return false;
             }
             // a boss whose script takes over at his last bit of health (the God-Devouring Serpent
@@ -728,13 +782,58 @@ impl Combat {
                 if tick.wrapping_sub(*t) < BOSS_FINISH_TICKS {
                     return true;
                 }
+                // (not while he's thrown or lying there: no hit reaches him then, and the blows
+                // below would count as missed)
+                if crate::swing::busy_with(handle) || crate::swing::is_down(handle) {
+                    *t = tick.wrapping_sub(BOSS_FINISH_TICKS - 30);
+                    return true;
+                }
+                // Still there: the hit that took him there wasn't one of the game's (a throw's
+                // impact, or a blow that didn't connect), or the game
+                // won't let him die yet (Malenia is kept at her last point by her script until
+                // her second phase is set off; ended by hand she just died). Told apart by a
+                // real blow with a point of health to spare: it's gone again if the blow landed,
+                // and he's still alive only if he can't die.
+                let mut probes = PROBES.lock().unwrap_or_else(|e| e.into_inner());
+                let probe = probes.get_or_insert_with(HashMap::new).entry(*key).or_default();
+                let hp = chr.modules.data.hp;
+                if let Some(fired) = probe.fired {
+                    if tick.wrapping_sub(fired) < PROBE_TICKS {
+                        return true;
+                    }
+                    probe.fired = None;
+                    if hp >= 2 {
+                        probe.misses += 1;
+                        chr.modules.data.hp = 1;
+                        log(format!("combat: the blow didn't land on c{:04} ({} of {PROBE_MISSES}), {hp} HP", chr.character_id, probe.misses));
+                    } else if !probe.undying {
+                        probe.undying = true;
+                        log(format!("combat: c{:04} took a real blow at his last point and lives: the game is keeping him, never finished by hand", chr.character_id));
+                    }
+                    // (the next one soon after a miss, every 2 s on one who can't die)
+                    *t = tick.wrapping_sub(BOSS_FINISH_TICKS - if probe.undying { 60 } else { 15 });
+                    return true;
+                }
+                if probe.misses < PROBE_MISSES {
+                    if crate::debug() {
+                        let effects: Vec<i32> = chr.special_effect.entries().map(|e| e.param_id).collect();
+                        log(format!("combat: c{:04} at his last point, effects {effects:?}", chr.character_id));
+                    }
+                    chr.modules.data.hp = 2;
+                    let at = chr.modules.physics.position;
+                    let result = finisher(player, &HavokPosition(at.0, at.1 - 0.6, at.2, 0.0), tick);
+                    log(format!("combat: a real blow on c{:04}: {result}", chr.character_id));
+                    probe.fired = Some(tick);
+                    return true;
+                }
+                probes.as_mut().map(|p| p.remove(key));
             }
             // (a boss Mario has grabbed or thrown: the throw's impact deals the final blow)
             if tick.wrapping_sub(*t) < 15 || crate::swing::busy_with(handle) {
                 return true;
             }
             chr.modules.data.hp = 0;
-            log("combat: final blow missed, finished directly");
+            log(format!("combat: final blow missed, finished directly (c{:04})", chr.character_id));
             false
         });
         for &(index, attack, diving) in hits {
@@ -777,7 +876,16 @@ impl Combat {
                 }
             }
             let (bullet, ..) = attack.spec();
-            let p = &target.er;
+            let result = strike(player, &target.er, bullet);
+            log(format!("combat: {:?} hit -> bullet {bullet}: {result}", attack as u8));
+        }
+    }
+}
+
+/// One of Mario's hits as the game sees it: a bullet of his, 1 m above `p`.
+fn strike(player: &ChrIns, p: &HavokPosition, bullet: i32) -> String {
+    {
+        {
             let from = player.modules.physics.position;
             let dir = glam::Vec3::new(p.0 - from.0, 0.0, p.2 - from.2).normalize_or(glam::Vec3::Z);
             let request = SpawnRequest {
@@ -801,11 +909,13 @@ impl Combat {
                 position: F32Vector4(p.0, p.1 + 1.0, p.2, 0.0),
                 rest: [0; 0x80],
             };
-            let Ok(manager) = (unsafe { CSBulletManager::instance_mut() }) else { return };
-            let result = manager.spawn_bullet(unsafe { &*(&request as *const SpawnRequest as *const _) });
-            log(format!("combat: {:?} hit -> bullet {bullet}: {result:?}", attack as u8));
+            let Ok(manager) = (unsafe { CSBulletManager::instance_mut() }) else { return "no bullet manager".into() };
+            format!("{:?}", manager.spawn_bullet(unsafe { &*(&request as *const SpawnRequest as *const _) }))
         }
     }
+}
+
+impl Combat {
 
     /// Game thread, every tick: the targets Mario can't stomp again before landing (indexes into
     /// `targets`); landing resets the count.

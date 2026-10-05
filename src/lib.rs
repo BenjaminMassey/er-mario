@@ -2712,6 +2712,24 @@ fn frame(data: &FD4TaskData) {
         // and drops a frame before "mounted" comes on, so the animation says it)
         // (no asking for the mount either: loading in already riding, the module doesn't have it)
         let riding = player_ref.chr_ins.modules.ride.is_mounted || mount_anim(cur);
+        // debug, End: every boss on the bar down to his last few points, so one more hit of
+        // Mario's is the one that takes him to his last (to try phase changes without the fight)
+        {
+            static HELD: AtomicBool = AtomicBool::new(false);
+            let end = debug_key(0x23);
+            if end && !HELD.swap(true, Ordering::Relaxed) {
+                if let Ok(wcm) = unsafe { WorldChrMan::instance_mut() } {
+                    for h in combat::boss_handles() {
+                        if let Some(chr) = wcm.chr_ins_by_handle_mut(&h) {
+                            log(format!("debug: c{:04} from {} HP to 2", chr.character_id, chr.modules.data.hp));
+                            chr.modules.data.hp = chr.modules.data.hp.min(2);
+                        }
+                    }
+                }
+            } else if !end {
+                HELD.store(false, Ordering::Relaxed);
+            }
+        }
         torrent_cant_die();
         yoshi::tick();
         trample::update(&mut m.combat, m.ticks, data.delta_time.time, yoshi::charge());
