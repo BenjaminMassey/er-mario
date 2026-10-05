@@ -328,6 +328,10 @@ pub fn nearby(center: &HavokPosition, range: f32, origin: [f32; 3]) -> Vec<Targe
             if chr.modules.data.hp <= 0 || chr.team_type == 0 || is_torrent(chr) {
                 continue;
             }
+            // (switched off by an event script: a boss's next phase waiting where the first fights)
+            if chr.debug_flags.character_disabled() {
+                continue;
+            }
             let p = chr.modules.physics.position;
             let (dx, dy, dz) = (p.0 - center.0, p.1 - center.1, p.2 - center.2);
             if dx * dx + dz * dz > range * range || dy.abs() > range {
@@ -406,6 +410,33 @@ fn boss_class(handle: &FieldInsHandle, chr: &ChrIns) -> bool {
         || chr.modules.data.max_hp >= BOSS_MAX_HP
 }
 
+/// How long a boss at his last point is left to his script before he's finished by hand (SM64
+/// ticks, 30 a second).
+const BOSS_FINISH_TICKS: u32 = 90;
+/// Bosses whose script took over at their last point: Mario's hits do nothing more to them.
+static SCRIPTED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// The character plays one of the animations event scripts force (20000-39999: intros, phase
+/// changes, waiting for a cutscene).
+fn scripted(chr: &ChrIns) -> bool {
+    let t = &chr.modules.time_act;
+    (20000..40000).contains(&(t.anim_queue[(t.read_idx % 10) as usize].anim_id % 1_000_000))
+}
+
+/// A boss the game is taking through a phase change: no hits, no grab.
+pub fn hands_off(handle: &FieldInsHandle) -> bool {
+    let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return false };
+    let Some(chr) = wcm.chr_ins_by_handle(handle) else { return false };
+    let key = handle_key(handle);
+    let mut left = SCRIPTED.lock().unwrap_or_else(|e| e.into_inner());
+    // (back at more than his last point: the fight started over)
+    if chr.modules.data.hp > 1 {
+        left.retain(|k| *k != key);
+        return false;
+    }
+    left.contains(&key) || (is_boss(handle) && scripted(chr))
+}
+
 /// Whether a character is a boss right now (its health bar is on screen).
 fn is_boss(handle: &FieldInsHandle) -> bool {
     let key = handle_key(handle);
@@ -471,8 +502,9 @@ pub fn impact(combat: &mut Combat, handle: &FieldInsHandle, pct: f32, tick: u32)
     let data = &mut chr.modules.data;
     let (hp, max) = (data.hp, data.max_hp.max(1));
     let dmg = ((max as f32 * pct / 100.0).ceil() as i32).max(1);
-    // (throws kill right there when the impact takes the rest of his HP)
-    data.hp = (hp - dmg).max(0);
+    // (throws kill right there when the impact takes the rest of his HP; a boss with a health
+    // bar keeps his last point for a moment, in case his script wants him at it)
+    data.hp = (hp - dmg).max(if is_boss(handle) { 1 } else { 0 });
     let dealt = hp - data.hp;
     show_damage(handle, hp, dealt, true);
     if data.hp == 1 {
@@ -562,7 +594,7 @@ fn take_share(handle: &FieldInsHandle, attack: Attack) -> bool {
     let Ok(wcm) = (unsafe { WorldChrMan::instance_mut() }) else { return false };
     let bar = is_boss(handle);
     // a thrown boss in the air or lying limp takes no hits (the throw's impact is the damage)
-    if crate::swing::is_down(handle) {
+    if crate::swing::is_down(handle) || hands_off(handle) {
         return false;
     }
     let Some(chr) = wcm.chr_ins_by_handle_mut(handle) else { return false };
@@ -656,17 +688,31 @@ impl Combat {
         self.cooldown.retain(|_, t| tick.wrapping_sub(*t) < 12);
         // the final blow is the bullet's; if it can't land (some small or odd characters), finish
         // them after 0.5 s
-        self.finishing.retain(|_, (handle, t)| {
+        self.finishing.retain(|key, (handle, t)| {
+            let Some(chr) = unsafe { WorldChrMan::instance_mut() }.ok().and_then(|w| w.chr_ins_by_handle_mut(handle)) else { return false };
+            if chr.modules.data.hp != 1 {
+                return false;
+            }
+            // a boss whose script takes over at his last bit of health (the God-Devouring Serpent
+            // turning into Rykard: forced animation, then the cutscene) is never finished by hand,
+            // he'd die in the middle of it and the next phase never came
+            if is_boss(handle) {
+                if scripted(chr) {
+                    log(format!("combat: c{:04} is in a scripted animation at his last point, left to the game", chr.character_id));
+                    SCRIPTED.lock().unwrap_or_else(|e| e.into_inner()).push(*key);
+                    return false;
+                }
+                // (the script reacts within a few frames: wait a little longer than for the rest)
+                if tick.wrapping_sub(*t) < BOSS_FINISH_TICKS {
+                    return true;
+                }
+            }
             // (a boss Mario has grabbed or thrown: the throw's impact deals the final blow)
             if tick.wrapping_sub(*t) < 15 || crate::swing::busy_with(handle) {
                 return true;
             }
-            if let Some(chr) = unsafe { WorldChrMan::instance_mut() }.ok().and_then(|w| w.chr_ins_by_handle_mut(handle)) {
-                if chr.modules.data.hp == 1 {
-                    chr.modules.data.hp = 0;
-                    log("combat: final blow missed, finished directly");
-                }
-            }
+            chr.modules.data.hp = 0;
+            log("combat: final blow missed, finished directly");
             false
         });
         for &(index, attack, diving) in hits {
@@ -694,7 +740,7 @@ impl Combat {
                     }
                 }
                 // a boss with a broken stance: this hit grabs him by the tail (swing.rs)
-                if crate::swing::try_grab(handle, target.radius / 100.0) {
+                if !hands_off(handle) && crate::swing::try_grab(handle, target.radius / 100.0) {
                     self.victims.insert(target.key, (*handle, tick));
                     continue;
                 }

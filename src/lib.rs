@@ -61,8 +61,10 @@ use windows::core::{PCSTR, w};
 
 /// Metres per SM64 unit (Mario is ~160 units tall, so ~1.6 m).
 pub(crate) const SCALE: f32 = 0.01;
-/// The game's floor material id for lava (ChrPhysicsMaterialInfo::hit_material).
-const LAVA_MATERIAL: i32 = 7;
+/// The game's floor materials that are lava (ChrPhysicsMaterialInfo::hit_material): the
+/// HitMtrlParam rows that put the lava burn (SpEffect 4101) on whoever stands on them. 7 is the
+/// lava of Mt. Gelmir, the others are other places' (Rykard's arena among them).
+const LAVA_MATERIALS: [i32; 6] = [7, 24, 27, 39, 47, 62];
 /// Havok collision layers Mario collides with (terrain, buildings, props, ...).
 const COLLISION_LAYERS: [u32; 11] = [0x1e, 0x2e, 0x37, 0x38, 0x39, 0x3a, 0x46, 0x47, 0x48, 0x49, 0x51];
 /// Raycast filter for the ground probes.
@@ -2334,10 +2336,12 @@ fn frame(data: &FD4TaskData) {
             // (also for a moment after: the burn keeps ticking while he's bounced up)
             static ON_LAVA: Mutex<Option<std::time::Instant>> = Mutex::new(None);
             let mut on_lava = ON_LAVA.lock().unwrap_or_else(|e| e.into_inner());
-            if player_ref.chr_ins.modules.physics.material_info.hit_material == LAVA_MATERIAL {
+            if LAVA_MATERIALS.contains(&player_ref.chr_ins.modules.physics.material_info.hit_material) {
                 *on_lava = Some(std::time::Instant::now());
             }
-            let from_lava = on_lava.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0);
+            // (not in a boss fight: there's no telling the burn from his hits, and in an arena
+            // full of lava every one of them was thrown away with it)
+            let from_lava = on_lava.is_some_and(|t| t.elapsed().as_secs_f32() < 1.0) && combat::boss_handles().is_empty();
             drop(on_lava);
             let hurt = damaged.filter(|_| !m.dead && !from_held && !from_lava);
             if debug() && was_damaged {
@@ -2444,7 +2448,7 @@ fn frame(data: &FD4TaskData) {
         let tt = std::time::Instant::now();
         let tick_span = perf::span(perf::TICK);
         // lava under the Tarnished (he stands where Mario does): SM64's lava boost
-        let lava = player_ref.chr_ins.modules.physics.material_info.hit_material == LAVA_MATERIAL;
+        let lava = LAVA_MATERIALS.contains(&player_ref.chr_ins.modules.physics.material_info.hit_material);
         let result = worker::call("tick", move |ctx| {
             if lava {
                 unsafe { sm64::sm64_er_lava(id) };
