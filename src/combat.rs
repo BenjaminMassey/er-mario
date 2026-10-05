@@ -252,6 +252,13 @@ pub fn hittable(t: ChrType) -> bool {
     matches!(t, ChrType::Npc | ChrType::Unk6 | ChrType::Unk7 | ChrType::Unk9 | ChrType::Unk12 | ChrType::BloodyFingerNpc | ChrType::RecusantNpc)
 }
 
+/// Torrent: the mount the game has down for the player (his model id is no help, c8002 here
+/// where c8000 was expected).
+pub fn is_torrent(chr: &ChrIns) -> bool {
+    let Ok(gdm) = (unsafe { eldenring::cs::GameDataMan::instance() }) else { return false };
+    handle_key(&gdm.main_player_game_data.mount_handle) == handle_key(&chr.field_ins_handle)
+}
+
 /// Characters within `range` metres of `center` (not the player, alive).
 pub fn nearby(center: &HavokPosition, range: f32, origin: [f32; 3]) -> Vec<Target> {
     let Ok(wcm) = (unsafe { WorldChrMan::instance() }) else { return Vec::new() };
@@ -276,7 +283,7 @@ pub fn nearby(center: &HavokPosition, range: f32, origin: [f32; 3]) -> Vec<Targe
             }
             // (team 0 belongs to no side: the game's invisible helpers, e.g. one at every grace with
             // ~1900 HP and a 0.1 m body, which Mario could punch to death)
-            if chr.modules.data.hp <= 0 || chr.team_type == 0 {
+            if chr.modules.data.hp <= 0 || chr.team_type == 0 || is_torrent(chr) {
                 continue;
             }
             let p = chr.modules.physics.position;

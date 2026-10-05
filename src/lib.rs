@@ -50,7 +50,7 @@ use eldenring::{
 use fromsoftware_shared::{F32Vector4, FromStatic, SharedTaskImpExt};
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::Input::XboxController::{
-    XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_LEFT_SHOULDER,
+    XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
     XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
     XINPUT_STATE,
 };
@@ -169,14 +169,31 @@ fn xinput_filter(index: u32, state: *mut XINPUT_STATE, rc: u32) -> u32 {
         // buttons reach the game (menus need them; the Tarnished's actions are stripped in
         // input_task); the left stick is Mario's alone outside menus
         let g = &mut s.Gamepad;
-        if !ON_LADDER.load(Ordering::Relaxed) {
+        let riding = RIDING.load(Ordering::Relaxed);
+        if !ON_LADDER.load(Ordering::Relaxed) && !riding {
             g.sThumbLX = 0;
             g.sThumbLY = 0;
+        }
+        // RB and RT whistle for Torrent (input_task); as the game's attack buttons, pressed in
+        // the same frame, they kept the whistle from being used
+        g.wButtons &= !XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        g.bRightTrigger = 0;
+        if WHISTLING.load(Ordering::Relaxed) {
+            g.wButtons |= XINPUT_GAMEPAD_X;
         }
         // with the SM64 camera the right stick is Lakitu's C-buttons, not Elden Ring's camera
         if lakitu::ON.load(Ordering::Relaxed) {
             g.sThumbRX = 0;
             g.sThumbRY = 0;
+        }
+        // Torrent goes where the game's own camera looks, which nobody sees with Lakitu's on:
+        // the stick is turned by the angle between the two
+        let turn = f32::from_bits(RIDE_TURN.load(Ordering::Relaxed));
+        if riding && turn.is_finite() {
+            let (x, y) = (g.sThumbLX as f32, g.sThumbLY as f32);
+            let (sin, cos) = turn.sin_cos();
+            g.sThumbLX = (x * cos + y * sin).clamp(-32767.0, 32767.0) as i16;
+            g.sThumbLY = (y * cos - x * sin).clamp(-32767.0, 32767.0) as i16;
         }
     }
     rc
@@ -1157,6 +1174,7 @@ fn game_driven(anim: i32) -> bool {
 
 /// SM64 action for climbing an Elden Ring ladder (libsm64 patch: the pole climb, moved by the game).
 const ACT_ER_LADDER: u32 = 0x0000035F;
+const ACT_ER_RIDE: u32 = 0x0000035E;
 const ACT_FREEFALL: u32 = 0x0100088C;
 
 /// Mario is following the Tarnished through a game-driven animation (fog wall, door, ladder...).
@@ -1179,6 +1197,13 @@ static PENDING_RESTORE: Mutex<Option<(std::time::Instant, equip::Loadout)>> = Mu
 static CREATE_RETRY: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 static RETURN_HOME: AtomicBool = AtomicBool::new(false);
 static FOLLOWING: AtomicBool = AtomicBool::new(false);
+/// Mario is on Torrent (or getting on): the game rides, like it walks him through a door, and
+/// the buttons a rider needs reach it.
+static RIDING: AtomicBool = AtomicBool::new(false);
+/// Mario is whistling for Torrent: the game gets its "use item" button pressed.
+static WHISTLING: AtomicBool = AtomicBool::new(false);
+/// Riding with Lakitu's camera: the angle (f32 bits) the left stick is turned by, NaN otherwise.
+static RIDE_TURN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x7fc0_0000);
 /// The Tarnished is on a ladder: the left stick (and WASD) climb it, so they go to the game.
 static ON_LADDER: AtomicBool = AtomicBool::new(false);
 
@@ -1193,6 +1218,12 @@ fn input_task() {
     }
     let Some(player) = (unsafe { WorldChrMan::instance_mut() }).ok().and_then(|w| w.main_player.as_mut()) else { return };
     let pad = PAD.lock().unwrap_or_else(|e| e.into_inner()).filter(|(_, t)| t.elapsed().as_secs_f32() < 0.25).map(|(p, _)| p);
+    // getting on or off Torrent, or whistling for him (the whistle's animations)
+    let ride_busy = {
+        let cur = current_anim(&player.chr_ins);
+        mount_anim(cur) || matches!(cur, 50190 | 50191)
+    };
+    let mounted = player.chr_ins.modules.ride.is_mounted;
     let req: &mut eldenring::cs::CSChrActionRequestModule = &mut player.chr_ins.modules.action_request;
     let bits = |a: &mut eldenring::cs::ChrActions| unsafe { &mut *(a as *mut _ as *mut u64) };
     let routed = *bits(&mut req.action_requests) != 0 || req.movement_request_duration > 0.0;
@@ -1280,14 +1311,87 @@ fn input_task() {
     if *bits(&mut req.new_action_presses) & ACTION != 0 {
         INTERACT_PRESSED.store(true, Ordering::Relaxed);
     }
+    // on Torrent the game needs the rider's buttons: dash (5), jump (6), the whistle (7, use
+    // item) and getting off (13)
+    const USE_ITEM: u64 = 1 << 7;
+    const RIDER: u64 = 1 << 5 | 1 << 6 | USE_ITEM | 1 << 13;
+    // (and "use item" while Mario whistles, see below)
+    let keep = if mounted {
+        ACTION | RIDER
+    } else if WHISTLING.load(Ordering::Relaxed) {
+        ACTION | USE_ITEM
+    } else {
+        ACTION
+    };
     for a in [
         &mut req.action_requests,
         &mut req.new_action_presses,
         &mut req.queued_action_inputs,
         &mut req.cancel_ready_actions,
     ] {
-        *bits(a) &= ACTION;
+        *bits(a) &= keep;
     }
+    // RB, RT (or R): Mario uses the item in the quick slot, the Spectral Steed Whistle if it's there
+    {
+        static HELD: AtomicBool = AtomicBool::new(false);
+        let rb = kbd::focused()
+            && !MENU_OPEN.load(Ordering::Relaxed)
+            && (pad.is_some_and(|p| p.Gamepad.wButtons.contains(XINPUT_GAMEPAD_RIGHT_SHOULDER) || p.Gamepad.bRightTrigger > 100)
+                || unsafe { GetAsyncKeyState(0x52) } as u16 & 0x8000 != 0);
+        // The key is held for a few frames. Not while he's getting on or off (a second whistle
+        // then breaks it off half way).
+        static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let busy = ride_busy;
+        if rb && !HELD.swap(rb, Ordering::Relaxed) && !busy && equip::select_whistle() {
+            log("input: whistle (use item) requested");
+            FRAMES.store(8, Ordering::Relaxed);
+        } else if !rb {
+            HELD.store(false, Ordering::Relaxed);
+        }
+        if busy && FRAMES.swap(0, Ordering::Relaxed) > 1 {
+            kbd::use_item_key(false);
+        }
+        // Asked for through the game's own "use item" buttons (X on the pad, R), which are let
+        // through for these frames: a request only written here comes too late in the frame.
+        let left = FRAMES.load(Ordering::Relaxed);
+        WHISTLING.store(left > 0, Ordering::Relaxed);
+        if left > 0 {
+            if left == 8 || left == 1 {
+                kbd::use_item_key(left == 8);
+            }
+            FRAMES.store(left - 1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Torrent takes no damage in Mario mode. Looked up twice a second, he comes and goes.
+fn torrent_cant_die() {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed().as_secs_f32() < 0.5) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    let Ok(wcm) = (unsafe { WorldChrMan::instance_mut() }) else { return };
+    // (he's kept with the spirit summons, or among the map's characters)
+    let all = wcm.summon_buddy_chr_set.characters().chain(wcm.chr_sets.iter().flatten().flat_map(|set| set.characters()));
+    for chr in all.filter(|c| combat::is_torrent(c)) {
+        if debug() && !chr.chr_flags1c5.is_invincible() {
+            log(format!(
+                "ride: Torrent made invincible (c{}, npc {}, type {:?}, team {}, hp {})",
+                chr.character_id, chr.npc_id, chr.chr_type, chr.team_type, chr.modules.data.hp
+            ));
+        }
+        chr.chr_flags1c5.set_is_invincible(true);
+        if chr.modules.data.hp > 0 {
+            chr.modules.data.hp = chr.modules.data.max_hp;
+        }
+    }
+}
+
+/// Getting on or off Torrent (101004 on, 101012 and 101212 off).
+fn mount_anim(anim: i32) -> bool {
+    (101000..102000).contains(&anim)
 }
 
 /// The Tarnished's current animation id.
@@ -1415,6 +1519,8 @@ fn frame(data: &FD4TaskData) {
         .map(|(s, _)| s);
     // in a menu Mario gets nothing, unless the game itself walks the character there (then only the
     // left stick: confirming in the menu mustn't make him jump or punch)
+    // (on Torrent the right stick still turns Lakitu's camera)
+    let cam_pad = pad.filter(|_| RIDING.load(Ordering::Relaxed) && !MENU_OPEN.load(Ordering::Relaxed));
     let pad = if FOLLOWING.load(Ordering::Relaxed) {
         None
     } else if MENU_OPEN.load(Ordering::Relaxed) {
@@ -1788,11 +1894,11 @@ fn frame(data: &FD4TaskData) {
             if lakitu::ON.load(Ordering::Relaxed) {
                 lakitu::hold();
             }
-        } else if lakitu::ON.load(Ordering::Relaxed) && !m.dead && !FOLLOWING.load(Ordering::Relaxed) {
+        } else if lakitu::ON.load(Ordering::Relaxed) && !m.dead && (!FOLLOWING.load(Ordering::Relaxed) || RIDING.load(Ordering::Relaxed)) {
             // (a popup pausing the game freezes the camera's controls too)
             let frozen = WORLD_PAUSED.load(Ordering::Relaxed);
             let key = |vk: i32| !frozen && kbd::focused() && unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000 != 0;
-            let stick = pad.filter(|_| !frozen).map(|p| (p.Gamepad.sThumbRX as i32, p.Gamepad.sThumbRY as i32)).unwrap_or((0, 0));
+            let stick = pad.or(cam_pad).filter(|_| !frozen).map(|p| (p.Gamepad.sThumbRX as i32, p.Gamepad.sThumbRY as i32)).unwrap_or((0, 0));
             const T: i32 = 20000;
             // C-left, C-right, C-up, C-down
             let c = [
@@ -1806,7 +1912,8 @@ fn frame(data: &FD4TaskData) {
             let havok = unsafe { eldenring::cs::CSHavokMan::instance() }.ok();
             // first person: the left stick (or WASD) looks around; A / B leave it
             let (mut look, mut exit) = ((0.0, 0.0), false);
-            if let Some(pd) = pad.filter(|_| !frozen) {
+            // (not on Torrent, the stick rides him)
+            if let Some(pd) = pad.filter(|_| !frozen && !RIDING.load(Ordering::Relaxed)) {
                 let g = pd.Gamepad;
                 let axis = |v: i16| {
                     let f = v as f32 / 32767.0;
@@ -1843,6 +1950,16 @@ fn frame(data: &FD4TaskData) {
         } else {
             lakitu::reset();
         }
+        let turn = lakitu::forward().filter(|_| RIDING.load(Ordering::Relaxed)).and_then(|ours| {
+            let cam = unsafe { WorldChrMan::instance() }.ok()?.chr_cam?;
+            let m = &unsafe { cam.as_ref() }.pers_cam.matrix;
+            let (right, theirs) = (glam::vec2(m.0.0, m.0.2), glam::vec2(m.2.0, m.2.2).try_normalize()?);
+            let ours = glam::vec2(ours.x, ours.z).try_normalize()?;
+            // which side the game's "right" is on, so the turn goes the right way round
+            let side = right.dot(glam::vec2(theirs.y, -theirs.x)).signum();
+            Some((side * (ours.x * theirs.y - ours.y * theirs.x)).atan2(ours.dot(theirs)))
+        });
+        RIDE_TURN.store(turn.unwrap_or(f32::NAN).to_bits(), Ordering::Relaxed);
     }
     let wedges = if m.dead { 0 } else { (m.state.health.max(0) >> 8) as u8 };
     // (no HUD on the loading screen: the Tarnished has no animation yet while the world loads)
@@ -2485,20 +2602,46 @@ fn frame(data: &FD4TaskData) {
         static ARMED: Mutex<Option<(std::time::Instant, i32)>> = Mutex::new(None);
         static FOLLOW: Mutex<Option<(std::time::Instant, i32, i32)>> = Mutex::new(None); // start, before, current
         let cur = current_anim(&player_ref.chr_ins);
+        // (the game's "mounting" flag is no use here: it stays on when getting on is broken off
+        // and drops a frame before "mounted" comes on, so the animation says it)
+        // (no asking for the mount either: loading in already riding, the module doesn't have it)
+        let riding = player_ref.chr_ins.modules.ride.is_mounted || mount_anim(cur);
+        torrent_cant_die();
+        {
+            static GIVEN: AtomicBool = AtomicBool::new(false);
+            if !GIVEN.swap(true, Ordering::Relaxed) {
+                equip::give_whistle();
+            }
+        }
+        if debug() {
+            static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+            let r = &player_ref.chr_ins.modules.ride;
+            let raw = unsafe { *((&**r as *const _ as usize + 0x160) as *const u32) };
+            let key = (r.is_mounting as u64) | (r.is_mounted as u64) << 1 | (r.has_ride_param as u64) << 2 | (r.is_ride_character as u64) << 3 | (r.last_mounted.is_some() as u64) << 4 | (raw as u64) << 8;
+            if LAST.swap(key, Ordering::Relaxed) != key {
+                log(format!(
+                    "ride: mounting {} mounted {} ride param {} last mounted {} raw+0x160 {raw:#010x} (anim {cur})",
+                    r.is_mounting, r.is_mounted, r.has_ride_param, r.last_mounted.is_some()
+                ));
+            }
+        }
+        if RIDING.swap(riding, Ordering::Relaxed) != riding {
+            log(format!("ride: {} (anim {cur})", if riding { "on Torrent" } else { "off" }));
+        }
         let mut armed = ARMED.lock().unwrap_or_else(|e| e.into_inner());
         let mut follow = FOLLOW.lock().unwrap_or_else(|e| e.into_inner());
         if INTERACT_PRESSED.swap(false, Ordering::Relaxed) && follow.is_none() {
             *armed = Some((std::time::Instant::now(), cur));
         }
         // any event animation (6xxxx: fog walls, doors, levers...) is game-driven
-        if follow.is_none() && armed.is_none() && game_driven(cur) {
+        if follow.is_none() && armed.is_none() && (game_driven(cur) || riding) {
             *armed = Some((std::time::Instant::now(), LAST_FREE_ANIM.load(Ordering::Relaxed)));
         }
         if !game_driven(cur) && follow.is_none() {
             LAST_FREE_ANIM.store(cur, Ordering::Relaxed);
         }
         if let Some((t, before)) = *armed {
-            if cur != before && game_driven(cur) {
+            if (cur != before && game_driven(cur)) || riding {
                 log(format!("follow: interact started anim {cur} (was {before})"));
                 FOLLOW_STARTED.store(true, Ordering::Relaxed);
                 // no moving / dynamic collision (the fog wall itself) while the game walks him
@@ -2526,10 +2669,10 @@ fn frame(data: &FD4TaskData) {
             let _ = before;
             // (a long ladder takes a while)
             let limit = if ladder_anim(last) { 60.0 } else { 15.0 };
-            if !game_driven(cur) || t.elapsed().as_secs_f32() > limit {
+            if !(game_driven(cur) || riding) || (!riding && t.elapsed().as_secs_f32() > limit) {
                 log("follow: done");
-                // off the ladder: SM64 takes over, dropping him onto the floor he's on
-                if m.state.action == ACT_ER_LADDER {
+                // off the ladder or off Torrent: SM64 takes over, dropping him onto the floor he's on
+                if m.state.action == ACT_ER_LADDER || m.state.action == ACT_ER_RIDE {
                     let id = m.id;
                     worker::call("ladder off", move |_| unsafe {
                         sm64::sm64_er_set_ladder(0.0);
@@ -2605,7 +2748,7 @@ fn frame(data: &FD4TaskData) {
                 FOLLOW_TICKS.fetch_add(1, Ordering::Relaxed);
                 let mut inputs = sm64::SM64MarioInputs::default();
                 // walking pace (SM64's full stick runs at ~9 m/s); teleport-sized jumps don't count
-                if walking && dir != glam::Vec3::ZERO && !on_ladder {
+                if walking && dir != glam::Vec3::ZERO && !on_ladder && !riding {
                     inputs.cam_look_x = -dir.x;
                     inputs.cam_look_z = dir.z;
                     // a clear walking pace: at the Tarnished's slow speed SM64 would sit on the edge
@@ -2625,7 +2768,8 @@ fn frame(data: &FD4TaskData) {
                 let mut loaded_at = LOADED_AT.lock().unwrap_or_else(|e| e.into_inner());
                 let reload = FOLLOW_STARTED.swap(false, Ordering::Relaxed)
                     || loaded_at.is_none_or(|q| ((q[0] - sm[0]).powi(2) + (q[2] - sm[2]).powi(2)).sqrt() > 500.0 || (q[1] - sm[1]).abs() > 100.0);
-                let floors: Option<Vec<sm64::SM64Surface>> = reload.then(|| {
+                // (on Torrent no floor is needed: he sits, SM64 doesn't move him)
+                let floors: Option<Vec<sm64::SM64Surface>> = (reload && !riding).then(|| {
                     *loaded_at = Some(sm);
                     let mut f: Vec<sm64::SM64Surface> = m.surfaces.iter().filter(|s| !collision::is_wall(s)).copied().collect();
                     f.extend(flat_floor(sm));
@@ -2633,6 +2777,7 @@ fn frame(data: &FD4TaskData) {
                 });
                 drop(loaded_at);
                 let ladder_was = m.state.action == ACT_ER_LADDER;
+                let sitting = m.state.action == ACT_ER_RIDE;
                 let parts = worker::call("follow tick", move |ctx| {
                     if let Some(floors) = &floors {
                         unsafe { sm64::sm64_static_surfaces_load(floors.as_ptr(), floors.len() as u32) };
@@ -2643,6 +2788,10 @@ fn frame(data: &FD4TaskData) {
                         unsafe { sm64::sm64_set_mario_faceangle(id, face) };
                     }
                     unsafe { sm64::sm64_set_mario_position(id, sm[0], sm[1], sm[2]) };
+                    // on Torrent: he sits (SM64's slide pose)
+                    if riding && !sitting {
+                        unsafe { sm64::sm64_set_mario_action(id, ACT_ER_RIDE) };
+                    }
                     // on a ladder: SM64's pole climb, at a pace from how fast the game moves him
                     // (~1.5 m/s climbing = SM64's quick climb)
                     if on_ladder {

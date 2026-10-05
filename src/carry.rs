@@ -166,6 +166,7 @@ fn bumped(mob: &FieldInsHandle, p: Vec3) -> Option<FieldInsHandle> {
                 || key(&chr.field_ins_handle) == key(mob)
                 || chr.modules.data.hp <= 0
                 || crate::combat::own_side(chr.team_type)
+                || crate::combat::is_torrent(chr)
             {
                 continue;
             }

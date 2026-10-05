@@ -180,3 +180,13 @@ pub unsafe fn install_hooks() {
         Err(e) => log(format!("kbd: keyboard hook failed ({e}); WASD also reaches the game")),
     }
 }
+
+/// Presses or releases the game's "use item" key (R, its default binding) as if typed. Writing
+/// the key into what the DirectInput hooks return didn't reach the game.
+pub fn use_item_key(down: bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, SendInput};
+    const SCAN_R: u16 = 0x13;
+    let flags = if down { KEYEVENTF_SCANCODE } else { KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP };
+    let key = INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wScan: SCAN_R, dwFlags: flags, ..Default::default() } } };
+    unsafe { SendInput(&[key], std::mem::size_of::<INPUT>() as i32) };
+}

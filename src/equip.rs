@@ -235,6 +235,48 @@ fn equip(slot: usize, item: u32) -> bool {
 }
 
 /// Adds items (quantity 1) to the inventory.
+/// The Spectral Steed Whistle (goods 130).
+const WHISTLE: u32 = 0x4000_0000 | 130;
+
+/// Mario gets Torrent's whistle if he doesn't have it yet (the game hands it out a few graces in).
+pub fn give_whistle() {
+    if init() && inventory_index(WHISTLE).is_none() {
+        log("equip: giving the Spectral Steed Whistle");
+        give(&[WHISTLE]);
+    }
+}
+
+/// Makes the whistle the selected quick item, putting it into a free quick slot first if it
+/// isn't in one. False if he has no whistle or all ten slots are taken by other things.
+pub fn select_whistle() -> bool {
+    let Ok(gdm) = (unsafe { GameDataMan::instance_mut() }) else { return false };
+    let Some(idx) = inventory_index(WHISTLE) else { return false };
+    let equipment = &mut gdm.main_player_game_data.equipment;
+    let ids = unsafe { &mut *(&mut equipment.equipment_entries.quick_tems as *mut _ as *mut [u32; 10]) };
+    let slot = match ids.iter().position(|&id| id == WHISTLE) {
+        Some(slot) => slot,
+        None => {
+            let Some(free) = ids.iter().position(|&id| id == u32::MAX) else {
+                log("equip: no free quick slot for the whistle");
+                return false;
+            };
+            let items = &equipment.equip_inventory_data.items_data;
+            let entries = items.normal_items_head.as_ptr() as usize;
+            let Some(entry) = (0..items.normal_items_len as usize).map(|i| entries + i * 0x18).find(|&e| unsafe { *((e + 4) as *const u32) } == WHISTLE) else {
+                return false;
+            };
+            // a quick slot is the item's gaitem handle and inventory index, like the armour slots
+            let slots = unsafe { &mut *(&mut equipment.equip_item_data.quick_slots as *mut _ as *mut [[u32; 2]; 10]) };
+            log(format!("equip: whistle into quick slot {free} (was {:#x} {})", slots[free][0], slots[free][1] as i32));
+            slots[free] = [unsafe { *(entry as *const u32) }, idx];
+            ids[free] = WHISTLE;
+            free
+        }
+    };
+    equipment.equip_item_data.selected_quick_slot = slot as i32;
+    true
+}
+
 fn give(items: &[u32]) {
     let Some(Some(f)) = FUNCS.get() else { return };
     let Ok(man) = (unsafe { MapItemMan::instance_mut() }) else { return };

@@ -394,6 +394,7 @@
 #define ACT_TOP_OF_POLE_TRANSITION     0x00100344 // (0x144 | ACT_FLAG_STATIONARY | ACT_FLAG_ON_POLE)
 #define ACT_TOP_OF_POLE                0x00100345 // (0x145 | ACT_FLAG_STATIONARY | ACT_FLAG_ON_POLE)
 #define ACT_ER_LADDER                  0x0000035F // er-mario: (0x15F | ACT_FLAG_STATIONARY) climbing an Elden Ring ladder
+#define ACT_ER_RIDE                    0x0000035E // er-mario: (0x15E | ACT_FLAG_STATIONARY) sitting on a mount Elden Ring rides
 #define ACT_START_HANGING              0x08200348 // (0x148 | ACT_FLAG_STATIONARY | ACT_FLAG_HANGING | ACT_FLAG_PAUSE_EXIT)
 #define ACT_HANGING                    0x00200349 // (0x149 | ACT_FLAG_STATIONARY | ACT_FLAG_HANGING)
 #define ACT_HANG_MOVING                0x0020054A // (0x14A | ACT_FLAG_MOVING | ACT_FLAG_HANGING)

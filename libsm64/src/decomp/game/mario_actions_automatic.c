@@ -878,6 +878,17 @@ s32 act_er_ladder(struct MarioState *m) {
     return FALSE;
 }
 
+// er-mario: Elden Ring rides the mount and Mario with it; SM64 only sits him down (the pose of
+// his slide)
+s32 act_er_ride(struct MarioState *m) {
+    mario_set_forward_vel(m, 0.0f);
+    m->vel[1] = 0.0f;
+    set_mario_animation(m, MARIO_ANIM_SLIDE);
+    vec3f_copy(m->marioObj->header.gfx.pos, m->pos);
+    vec3s_set(m->marioObj->header.gfx.angle, 0, m->faceAngle[1], 0);
+    return FALSE;
+}
+
 s32 mario_execute_automatic_action(struct MarioState *m) {
     s32 cancel;
 
@@ -907,6 +918,7 @@ s32 mario_execute_automatic_action(struct MarioState *m) {
         case ACT_IN_CANNON:              cancel = act_in_cannon(m);              break;
         case ACT_TORNADO_TWIRLING:       cancel = act_tornado_twirling(m);       break;
         case ACT_ER_LADDER:              cancel = act_er_ladder(m);              break;
+        case ACT_ER_RIDE:                cancel = act_er_ride(m);                break;
     }
     /* clang-format on */
 
